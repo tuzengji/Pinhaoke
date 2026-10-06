@@ -22,6 +22,7 @@ The prefix alone determines which DB the detail endpoint opens, so callers do
 NOT need to pass ?term= when fetching a specific course.
 """
 import base64
+import fcntl
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import lru_cache
@@ -217,14 +218,26 @@ def get_reviews_db():
             conn.close()
 
 
+def _initialize_wal(conn, database_path: Path) -> None:
+    # 必须读完 PRAGMA 结果，等待文件锁时不能持有 SQLite 读锁。
+    if conn.execute("PRAGMA journal_mode").fetchall()[0][0] == "wal":
+        return
+    # WAL 切换需要排他锁；用独立空文件协调线程和 worker，不锁 SQLite 文件本身。
+    # 保留文件以免等待者和新请求锁到不同 inode；关闭描述符即自动释放 flock。
+    lock_path = Path(str(database_path.resolve()) + ".init.lock")
+    with lock_path.open("a") as initialization_lock:
+        fcntl.flock(initialization_lock.fileno(), fcntl.LOCK_EX)
+        conn.execute("PRAGMA journal_mode = WAL").fetchall()
+
+
 @contextmanager
 def get_messages_db():
     conn = None
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH, timeout=5)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA busy_timeout = 5000")
+        _initialize_wal(conn, MESSAGES_DB_PATH)
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS messages ("
@@ -270,8 +283,8 @@ def get_stats_db():
     try:
         conn = sqlite3.connect(STATS_DB_PATH, timeout=5)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA busy_timeout = 5000")
+        _initialize_wal(conn, STATS_DB_PATH)
         # 每天每个访客一行；同一访客当天多次访问只累加 views，不新增行。
         conn.execute(
             "CREATE TABLE IF NOT EXISTS visit_days ("
@@ -457,8 +470,8 @@ def get_accounts_db():
     try:
         conn = sqlite3.connect(ACCOUNTS_DB_PATH, timeout=5)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA busy_timeout = 5000")
+        _initialize_wal(conn, ACCOUNTS_DB_PATH)
         conn.execute("PRAGMA foreign_keys = ON")
         _migrate_accounts_db(conn)
         yield conn
@@ -836,16 +849,9 @@ def _period_bounds(period: object) -> tuple[int, int] | None:
     return start, end
 
 
-@app.get("/api/filters")
-def get_filters(
-    term: str = Query(
-        "fall",
-        description="spring | summer | fall",
-        pattern=r"^(?:spring|summer|fall)$",
-    ),
-):
-    if term not in VALID_TERMS:
-        raise HTTPException(status_code=422, detail="Invalid course query parameter")
+@lru_cache(maxsize=6)
+def _filter_options(term, revision):
+    # 只缓存公开课程选项；数据库或 WAL 版本变化后重新读取，不保留连接或可变列表。
     with get_db(term) as conn:
         c = conn.cursor()
 
@@ -921,6 +927,21 @@ def get_filters(
         "weekdays": weekdays,
         "periods": periods,
     }
+    return tuple((key, tuple(values)) for key, values in payload.items())
+
+
+@app.get("/api/filters")
+def get_filters(
+    term: str = Query(
+        "fall",
+        description="spring | summer | fall",
+        pattern=r"^(?:spring|summer|fall)$",
+    ),
+):
+    if term not in VALID_TERMS:
+        raise HTTPException(status_code=422, detail="Invalid course query parameter")
+    revision = _database_revision(path for _, path, _ in TERM_DBS[term])
+    payload = {key: list(values) for key, values in _filter_options(term, revision)}
     # Filter universes only change when DBs are rebuilt. 1 hour browser cache
     # keeps cold-load fast without making a redeploy require a hard refresh.
     return JSONResponse(payload, headers={"Cache-Control": "public, max-age=3600"})
@@ -1147,6 +1168,11 @@ def _grouped_course_ctes(source_sql: str, matching_where: str) -> str:
     fill_count = _fallback_fill_count_sql("representative", "candidate")
 
     matching_group_ctes = _matching_group_ctes(source_sql, matching_where)
+    # 无筛选时所有非空组都已命中，省去 DISTINCT 与回联；空键沿用 JOIN 的排除语义。
+    group_match = (
+        "JOIN matching_groups USING (group_key)" if matching_where
+        else "WHERE s.group_key IS NOT NULL"
+    )
     return f"""
         {matching_group_ctes}, ranked AS (
             SELECT s.*,
@@ -1157,7 +1183,7 @@ def _grouped_course_ctes(source_sql: str, matching_where: str) -> str:
                                 s.id
                    ) AS representative_rank
             FROM source AS s
-            JOIN matching_groups USING (group_key)
+            {group_match}
         ), fallback_candidates AS (
             SELECT candidate.*,
                    ROW_NUMBER() OVER (

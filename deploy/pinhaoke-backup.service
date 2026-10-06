@@ -1,0 +1,37 @@
+[Unit]
+Description=Pinhaoke writable-database backup
+After=pinhaoke.service
+Wants=pinhaoke.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+SupplementaryGroups=www-data
+# 环境变量与 pinhaoke.service 一致，指向三个可写库；副本目录锁到 root-only。
+Environment=PINHAOKE_ACCOUNTS_DB=/var/lib/pinhaoke/账户.db
+Environment=PINHAOKE_MESSAGES_DB=/var/lib/pinhaoke/留言板.db
+Environment=PINHAOKE_STATS_DB=/var/lib/pinhaoke/访问统计.db
+Environment=PINHAOKE_BACKUP_DIR=/var/backups/pinhaoke
+Environment=PINHAOKE_BACKUP_RETENTION=14
+ExecStart=/opt/pinhaoke/venv/bin/python /opt/pinhaoke/deploy/backup_databases.py
+
+# 父进程保留 root-only 副本；降权读取者需创建 www-data 所属的 WAL/SHM。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/pinhaoke /var/lib/pinhaoke
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_KILL
+AmbientCapabilities=
+UMask=0077
+TimeoutStartSec=7min

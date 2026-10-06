@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 import json
+import multiprocessing
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -10,6 +11,19 @@ from unittest.mock import patch
 
 import app
 from tests.test_app import _account_request, _session_cookie
+
+
+def _migrate_messages_process(database, barrier, output):
+    # 每个 worker 独立导入 app，模拟生产多个进程首次打开同一临时旧库。
+    app.MESSAGES_DB_PATH = Path(database)
+    try:
+        barrier.wait(timeout=15)
+        with app.get_messages_db() as conn:
+            row = dict(conn.execute("SELECT * FROM messages WHERE id=8").fetchone())
+            output.put(("ok", row, conn.execute("PRAGMA user_version").fetchone()[0],
+                        conn.execute("PRAGMA journal_mode").fetchone()[0]))
+    except Exception as error:
+        output.put(("error", type(error).__name__, str(error)))
 
 
 class MessageRepliesAndNicknameTests(unittest.TestCase):
@@ -152,6 +166,75 @@ class MessageRepliesAndNicknameTests(unittest.TestCase):
         self.assertEqual(migrated[0]["content"], "<script>旧留言</script>")
         self.assertEqual(migrated[0]["ip_hash"], "old-hash")
         self.assertGreater(self.root()["id"], 8)
+
+    def make_legacy_messages(self, database):
+        with closing(sqlite3.connect(database)) as conn:
+            conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, posted_at INTEGER NOT NULL, content TEXT NOT NULL, ip_hash TEXT NOT NULL)")
+            conn.execute("INSERT INTO messages VALUES (8, 1700000000, '<script>旧留言</script>', 'old-hash')")
+            conn.commit()
+
+    def assert_legacy_message_preserved(self, row):
+        self.assertEqual(row, {"id": 8, "posted_at": 1700000000, "content": "<script>旧留言</script>",
+                               "ip_hash": "old-hash", "nickname": "路过的 PKUer",
+                               "parent_id": None, "course_key": ""})
+
+    def test_legacy_messages_wal_initialization_is_stable_under_threads(self):
+        for iteration in range(25):
+            with self.subTest(iteration=iteration):
+                database = app.MESSAGES_DB_PATH.parent / f'thread-migration-{iteration}.db'
+                self.make_legacy_messages(database)
+                barrier = threading.Barrier(4)
+                def migrate(_):
+                    barrier.wait(timeout=10)
+                    with app.get_messages_db() as conn:
+                        return (dict(conn.execute("SELECT * FROM messages WHERE id=8").fetchone()),
+                                conn.execute("PRAGMA user_version").fetchone()[0])
+                with patch.object(app, 'MESSAGES_DB_PATH', database), ThreadPoolExecutor(max_workers=4) as pool:
+                    migrated = list(pool.map(migrate, range(4)))
+                for row, version in migrated:
+                    self.assert_legacy_message_preserved(row)
+                    self.assertEqual(version, 2)
+
+    def test_legacy_messages_wal_initialization_is_stable_across_processes(self):
+        context = multiprocessing.get_context('spawn')
+        for iteration in range(5):
+            with self.subTest(iteration=iteration):
+                database = app.MESSAGES_DB_PATH.parent / f'process-migration-{iteration}.db'
+                self.make_legacy_messages(database)
+                barrier = context.Barrier(4)
+                output = context.Queue()
+                workers = [context.Process(target=_migrate_messages_process,
+                           args=(str(database), barrier, output), name=f'pinhaoke-migration-{index}')
+                           for index in range(4)]
+                try:
+                    for worker in workers:
+                        worker.start()
+                    for _ in workers:
+                        result = output.get(timeout=20)
+                        self.assertEqual(result[0], 'ok', result)
+                        self.assert_legacy_message_preserved(result[1])
+                        self.assertEqual(result[2:], (2, 'wal'))
+                    for worker in workers:
+                        worker.join(timeout=10)
+                        self.assertEqual(worker.exitcode, 0)
+                finally:
+                    for worker in workers:
+                        if worker.pid is not None and worker.is_alive():
+                            worker.terminate()
+                        if worker.pid is not None:
+                            worker.join(timeout=5)
+                            worker.close()
+                    output.close()
+                    output.join_thread()
+
+    def test_existing_wal_messages_do_not_acquire_initialization_lock(self):
+        with app.get_messages_db() as conn:
+            self.assertEqual(conn.execute('PRAGMA journal_mode').fetchone()[0], 'wal')
+        lock = Path(str(app.MESSAGES_DB_PATH.resolve()) + '.init.lock')
+        self.assertEqual(lock.stat().st_size, 0)
+        with patch.object(app.fcntl, 'flock', side_effect=AssertionError('existing WAL must skip initialization lock')):
+            root = self.root()
+            self.assertEqual(self.replies(root['id']), {'replies': [], 'has_more': False})
 
     def test_accounts_migrate_v3_concurrently_and_preserve_sessions(self):
         request = self.register()

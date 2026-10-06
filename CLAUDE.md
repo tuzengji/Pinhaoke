@@ -131,9 +131,9 @@ git diff --check
 
 `get_reviews_db()` 以相同的 SQLite URI `mode=ro` 和 `PRAGMA query_only = ON` 打开 `树洞课程评测.db`。`GET /api/health` 检查五个课程库的表、详情行数、ID 集合、外键与完整性，同时检查评测库的必需表、元数据行数、外键和完整性。结果使用短时进程内缓存并返回 `Cache-Control: no-store`。
 
-课程列表 `_course_page_rows` 与评测搜索 `_review_page` 各使用 `lru_cache(maxsize=32)`。键包含查询参数、页码及源数据库版本；`_database_revision` 检查主文件与 WAL 的路径、设备、inode、大小及纳秒修改时间和变更时间，原子替换或库内写入均使缓存失效。缓存不保存数据库连接，课程行重新组装响应，评测结果深拷贝，避免请求间共享可变对象。课程补充状态在每次请求中另查留言库并返回 `no-store`，不缓存账号、收藏或课表响应。SQLite URI 由 `Path.as_uri()` 编码，含特殊字符的合法路径仍保持只读。
+课程列表 `_course_page_rows` 与评测搜索 `_review_page` 各使用 `lru_cache(maxsize=32)`。筛选选项 `_filter_options` 使用 `lru_cache(maxsize=6)`，缓存不可变元组并在每次响应中重新组装列表；沿用 `public, max-age=3600` 的浏览器缓存。键包含查询参数、页码及源数据库版本；`_database_revision` 检查主文件与 WAL 的路径、设备、inode、大小及纳秒修改时间和变更时间，原子替换或库内写入均使缓存失效。缓存不保存数据库连接，课程行重新组装响应，评测结果深拷贝，避免请求间共享可变对象。课程补充状态在每次请求中另查留言库并返回 `no-store`，不缓存账号、收藏或课表响应。SQLite URI 由 `Path.as_uri()` 编码，含特殊字符的合法路径仍保持只读。
 
-`get_messages_db()` 打开可写的留言板数据库：路径来自环境变量 `PINHAOKE_MESSAGES_DB`，本地开发默认仓库根目录 `留言板.db`（已被 `.gitignore` 排除，不进入仓库），生产由 systemd `StateDirectory` 提供 `/var/lib/pinhaoke/留言板.db`。连接启用 WAL 与 `busy_timeout`，首次使用时自建 `messages` 表并迁移到版本 1，增加昵称与回复关系（详见留言板 API 契约）；六个正式库保持只读，`GET /api/health` 不检查留言库。
+`get_messages_db()` 打开可写的留言板数据库：路径来自环境变量 `PINHAOKE_MESSAGES_DB`，本地开发默认仓库根目录 `留言板.db`（已被 `.gitignore` 排除，不进入仓库），生产由 systemd `StateDirectory` 提供 `/var/lib/pinhaoke/留言板.db`。连接启用 WAL 与 `busy_timeout`。三个可写库共用 `_initialize_wal()`；首次从非 WAL 模式切换时，先读完模式查询，再用同目录的空文件 `<库名>.init.lock` 和 `flock` 协调线程及多个 worker；等待文件锁时不持有 SQLite 读锁。锁文件保留，关闭描述符自动解锁，已是 WAL 的库不获取文件锁。schema 迁移仍使用 `BEGIN IMMEDIATE` 和锁内版本复查，保留全部旧记录；首次使用时自建 `messages` 表并迁移到版本 1，增加昵称与回复关系（详见留言板 API 契约）；六个正式库保持只读，`GET /api/health` 不检查留言库。
 
 `get_stats_db()` 以同样方式打开可写的访问统计数据库：路径来自 `PINHAOKE_STATS_DB`，本地默认仓库根目录 `访问统计.db`（已 `.gitignore`），生产为 `/var/lib/pinhaoke/访问统计.db`，首次使用时自建 `visit_days(day, ip_hash, views, last_at)` 表。`record_visit()` 在 `/` 和 `/reviews` 页面路由中记录访问，按北京时间分日、以 IP 哈希对当日访客去重、`views` 累加，并过滤明显的 bot User-Agent；任何异常都被吞掉，绝不影响页面返回。`GET /api/health` 不检查统计库。
 
@@ -269,7 +269,7 @@ API ID 是带命名空间的字符串，不是整数：
 
 代表记录按详情完整度选择，分数相同取较小的本地 ID；另一条记录只在能补足代表记录空字段时作为 fallback。`course_type` 和 `category` 聚合为稳定排序的数组。列表响应中这两个字段是数组，详情响应中是字符串；前端统一通过 `asArray()` 和 badge helper 渲染。
 
-筛选只决定哪些组命中，不得改变代表 ID、完整徽章集合或非空字段。所有排序以唯一 `id` 收尾；`random` 使用 `random_seed` 和代表 ID 的确定性表达式，禁止改成 `ORDER BY RANDOM()`。
+筛选只决定哪些组命中，不得改变代表 ID、完整徽章集合或非空字段。无筛选时全部非空分组已命中，直接进入代表记录排序，省去命中组去重与回联；空分组键仍按原联接语义排除。所有排序以唯一 `id` 收尾；`random` 使用 `random_seed` 和代表 ID 的确定性表达式，禁止改成 `ORDER BY RANDOM()`。
 
 ## 多语言
 
@@ -356,7 +356,11 @@ sudo bash /opt/pinhaoke/deploy/update.sh
 
 不要手工 `git pull` 后重启，不要绕过预检，不要让 `www-data` 持有代码、Git、虚拟环境或六个正式数据库。更新脚本部署精确 `origin/main`，在停服前完成目标工作树、LFS 和候选 venv 预检，激活失败或收到 INT/TERM 时自动恢复旧提交、旧 unit、旧 venv 和原服务状态。
 
-留言板、访问统计与账户三个可写数据库是仅有的例外：它们位于 `/var/lib/pinhaoke/留言板.db`、`/var/lib/pinhaoke/访问统计.db` 与 `/var/lib/pinhaoke/账户.db`，由 systemd `StateDirectory` 自动创建并归服务用户所有，`StateDirectoryMode=0750` 限制目录权限，不在仓库和 `/opt/pinhaoke` 内。`deploy/update.sh` 与回滚不触碰这些数据，备份需单独处理。
+留言板、访问统计与账户三个可写数据库是仅有的例外：它们位于 `/var/lib/pinhaoke/留言板.db`、`/var/lib/pinhaoke/访问统计.db` 与 `/var/lib/pinhaoke/账户.db`，由 systemd `StateDirectory` 自动创建并归服务用户所有，`StateDirectoryMode=0750` 限制目录仅服务用户与组可读；它们不在仓库和 `/opt/pinhaoke` 内，`deploy/update.sh` 与回滚不覆盖这些数据。
+
+三库备份由 `deploy/backup_databases.py` 使用 SQLite Online Backup 完成。生产读取在 `www-data` 子进程中以 `mode=ro` 和 `query_only` 打开源库；SQLite 仍可能创建 WAL/SHM 辅助文件，因此源目录需允许读取身份维护辅助文件，不能把只读 SQL 连接等同于只读目录。子进程先生成私有临时快照，再经父进程已打开的输出描述符传出字节；root 父进程检查子进程退出状态和快照完整性后原子保存到 `/var/backups/pinhaoke`（目录 0700、文件 0600），读取身份不能访问该备份目录。
+
+`pinhaoke-backup.timer` 独立于应用更新脚本；备份单元仅保留降权所需的 `SETUID`/`SETGID` 和超时终止跨 UID 子进程所需的 `KILL` 能力。安装前先创建 root 私有备份目录，部署前须核对既有备份单元是否与脚本配套；更新仓库模板不等于安装或启用单元。服务器单元、目录及权限变更须另外获得明确授权，具体步骤见 `deploy/README.md` 的 `## 数据备份`。
 
 `deploy/nginx.conf` 只是与 Certbot 共存的站点模板，必须手工安装并先运行 `nginx -t`；`deploy/update.sh` 不覆盖 Nginx。任何任务只有用户明确要求后才可 push 或部署。本地通过测试不代表生产已更新。
 

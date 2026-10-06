@@ -1,0 +1,11 @@
+[Unit]
+Description=Pinhaoke database backup schedule
+
+[Timer]
+# 每天错峰两次（北京时间取决于服务器时区）；错过后开机补跑一次。
+OnCalendar=*-*-* 04,16:20:00
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

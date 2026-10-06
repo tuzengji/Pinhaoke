@@ -1,10 +1,13 @@
 """Read-only query caching must not cache mutable state or survive data updates."""
+from contextlib import closing, contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import json
 import os
 import shutil
 import sqlite3
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -23,7 +26,7 @@ class QueryCacheTests(unittest.TestCase):
         patcher.start(); self.addCleanup(patcher.stop)
         patcher = patch.object(app, 'MESSAGES_DB_PATH', self.root / 'messages.db')
         patcher.start(); self.addCleanup(patcher.stop)
-        for cache in (app._course_page_rows, app._review_page):
+        for cache in (app._course_page_rows, app._review_page, app._filter_options):
             cache.cache_clear()
             self.addCleanup(cache.cache_clear)
 
@@ -68,6 +71,142 @@ class QueryCacheTests(unittest.TestCase):
         os.replace(replacement, self.database)
         self.assertTrue(all(c['notes'] == '原子替换' for c in self.courses()['courses']))
         self.assertEqual(app._course_page_rows.cache_info().misses, 4)
+
+    def test_filter_cache_reuses_options_and_returns_independent_responses(self):
+        with patch.object(app, 'get_db', wraps=app.get_db) as source:
+            first = app.get_filters('summer')
+            expected = json.loads(first.body)
+            decoded = json.loads(first.body)
+            decoded['course_types'].clear()
+            again = app.get_filters('summer')
+            self.assertEqual(json.loads(again.body), expected)
+            self.assertEqual(first.headers['cache-control'], 'public, max-age=3600')
+            self.assertEqual(source.call_count, 1)
+            app.get_filters('fall')
+            self.assertEqual(source.call_count, 2)
+            self.assertEqual(json.loads(app.get_filters('summer').body), expected)
+            self.assertEqual(source.call_count, 2)
+        self.assertEqual(app._filter_options.cache_info().maxsize, 6)
+
+    def test_filter_cache_invalidates_for_in_place_wal_and_atomic_replacement(self):
+        app.get_filters('summer')
+        with closing(sqlite3.connect(self.database)) as writer, writer:
+            writer.execute("UPDATE basic_info SET department='原位院系', schedule='每周周二13~14节'")
+        payload = json.loads(app.get_filters('summer').body)
+        self.assertEqual(payload['departments'], ['原位院系'])
+        self.assertEqual(payload['periods'], ['13-14'])
+        writer = sqlite3.connect(self.database)
+        try:
+            writer.execute('PRAGMA journal_mode=WAL')
+            writer.execute("UPDATE basic_info SET department='WAL院系', schedule='每周周三1~14节'")
+            writer.commit()
+            payload = json.loads(app.get_filters('summer').body)
+            self.assertEqual(payload['departments'], ['WAL院系'])
+            self.assertEqual(payload['periods'], ['1-14'])
+        finally:
+            writer.close()
+        replacement = self.root / 'replacement.db'
+        shutil.copyfile(app.SUMMER_DB, replacement)
+        with closing(sqlite3.connect(replacement)) as writer, writer:
+            writer.execute("UPDATE basic_info SET department='替换院系', schedule='每周周五7~8节'")
+        os.replace(replacement, self.database)
+        payload = json.loads(app.get_filters('summer').body)
+        self.assertEqual(payload['departments'], ['替换院系'])
+        self.assertEqual(payload['periods'], ['7-8'])
+        self.assertEqual(app._filter_options.cache_info().misses, 4)
+
+    def test_public_caches_follow_passive_and_truncate_wal_checkpoints(self):
+        with closing(sqlite3.connect(self.database)) as writer:
+            writer.execute('PRAGMA journal_mode=WAL')
+            writer.execute('PRAGMA wal_autocheckpoint=0')
+            writer.execute("UPDATE basic_info SET department='WAL院系'")
+            writer.commit()
+            filters = json.loads(app.get_filters('summer').body)
+            courses = self.courses()
+            revision = app._database_revision((self.database,))
+            inode = self.database.stat().st_ino
+            wal = Path(str(self.database) + '-wal')
+            wal_size = wal.stat().st_size
+            checkpoint = writer.execute('PRAGMA wal_checkpoint(PASSIVE)').fetchone()
+            self.assertEqual(checkpoint[0], 0)
+            self.assertEqual(checkpoint[1], checkpoint[2])
+            self.assertEqual(wal.stat().st_size, wal_size)
+            self.assertNotEqual(app._database_revision((self.database,)), revision)
+            self.assertEqual(json.loads(app.get_filters('summer').body), filters)
+            self.assertEqual(self.courses(), courses)
+            self.assertEqual(app._filter_options.cache_info().misses, 2)
+            self.assertEqual(app._course_page_rows.cache_info().misses, 2)
+
+            writer.execute("UPDATE basic_info SET department='检查点后院系'")
+            writer.commit()
+            filters = json.loads(app.get_filters('summer').body)
+            courses = self.courses()
+            self.assertEqual(filters['departments'], ['检查点后院系'])
+            self.assertTrue(all(course['department'] == '检查点后院系' for course in courses['courses']))
+            revision = app._database_revision((self.database,))
+            self.assertEqual(writer.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone(), (0, 0, 0))
+            self.assertEqual(wal.stat().st_size, 0)
+            self.assertEqual(self.database.stat().st_ino, inode)
+            self.assertNotEqual(app._database_revision((self.database,)), revision)
+            self.assertEqual(json.loads(app.get_filters('summer').body), filters)
+            self.assertEqual(self.courses(), courses)
+            self.assertEqual(app._filter_options.cache_info().misses, 4)
+            self.assertEqual(app._course_page_rows.cache_info().misses, 4)
+
+    def test_late_filter_read_cannot_replace_a_newer_revision_cached_concurrently(self):
+        ready = threading.Event()
+        release = threading.Event()
+        get_db = app.get_db
+
+        @contextmanager
+        def delayed_old_read(term):
+            with get_db(term) as conn:
+                yield conn
+            if threading.current_thread().name.startswith('old-filter-read'):
+                ready.set()
+                if not release.wait(5):
+                    raise TimeoutError('test did not release old filter read')
+
+        with closing(sqlite3.connect(self.database)) as writer:
+            writer.execute('PRAGMA journal_mode=WAL')
+            writer.execute('PRAGMA wal_autocheckpoint=0')
+            writer.execute("UPDATE basic_info SET department='旧版院系'")
+            writer.commit()
+            with patch.object(app, 'get_db', side_effect=delayed_old_read) as source, \
+                 ThreadPoolExecutor(max_workers=1, thread_name_prefix='old-filter-read') as executor:
+                pending = executor.submit(app.get_filters, 'summer')
+                try:
+                    self.assertTrue(ready.wait(5), 'old read did not reach the test gate')
+                    writer.execute("UPDATE basic_info SET department='新版院系'")
+                    writer.commit()
+                    newer = app.get_filters('summer')
+                    self.assertEqual(json.loads(newer.body)['departments'], ['新版院系'])
+                finally:
+                    release.set()
+                self.assertEqual(json.loads(pending.result(timeout=5).body)['departments'], ['旧版院系'])
+                self.assertEqual(app.get_filters('summer').body, newer.body)
+                self.assertEqual(source.call_count, 2)
+            self.assertEqual(app._filter_options.cache_info().misses, 2)
+            self.assertEqual(app._filter_options.cache_info().hits, 1)
+
+    def test_unfiltered_grouping_matches_selecting_every_group_and_excludes_null_keys(self):
+        source, params, _ = app._build_course_query('summer', 'zh', {})
+        # 模拟空分组键，确保跳过命中组回联后仍保留原来的 NULL 排除语义。
+        source = source.replace('AS group_key', 'AS original_group_key')
+        source = (
+            f"SELECT s.*, CASE WHEN s.id='s1' THEN NULL ELSE s.original_group_key END AS group_key"
+            f" FROM ({source}) s"
+        )
+        with app.get_db('summer') as conn:
+            optimized = conn.execute(
+                app._grouped_course_ctes(source, '') + ' SELECT * FROM grouped ORDER BY id', params,
+            ).fetchall()
+            all_selected = conn.execute(
+                app._grouped_course_ctes(source, ' WHERE 1') + ' SELECT * FROM grouped ORDER BY id', params,
+            ).fetchall()
+        self.assertTrue(optimized)
+        self.assertEqual([dict(row) for row in optimized], [dict(row) for row in all_selected])
+        self.assertNotIn('s1', {row['id'] for row in optimized})
 
     def test_queries_and_pages_have_independent_entries(self):
         first = self.courses()

@@ -24,6 +24,10 @@ class DeployContractTests(unittest.TestCase):
         cls.main = cls.update[cls.update.index("\nmain() {") :]
         readme = ROOT / "deploy/README.md"
         cls.deploy_readme = readme.read_text() if readme.exists() else ""
+        backup_service = ROOT / "deploy/pinhaoke-backup.service"
+        backup_timer = ROOT / "deploy/pinhaoke-backup.timer"
+        cls.backup_service = backup_service.read_text() if backup_service.exists() else ""
+        cls.backup_timer = backup_timer.read_text() if backup_timer.exists() else ""
 
     def test_direct_dependencies_are_exactly_pinned_to_audited_versions(self):
         self.assertEqual(
@@ -694,6 +698,55 @@ class DeployContractTests(unittest.TestCase):
             self.assertIn(text, self.deploy_readme)
         self.assertRegex(self.deploy_readme, r"手[动工]")
         self.assertRegex(self.deploy_readme, r"systemctl\s+(status|is-active)")
+
+    def test_backup_units_are_hardened_and_root_scoped(self):
+        service = self.backup_service
+        self.assertIn("Type=oneshot", service)
+        self.assertIn("User=root", service)
+        self.assertIn("Group=root", service)
+        self.assertIn("SupplementaryGroups=www-data", service)
+        # SQLite 只读连接也可能需要创建 sidecar；用服务身份创建，副本仍为 root-only。
+        self.assertIn("ReadWritePaths=/var/backups/pinhaoke /var/lib/pinhaoke", service)
+        self.assertNotIn("ReadOnlyPaths=/var/lib/pinhaoke", service)
+        self.assertIn("ProtectSystem=strict", service)
+        self.assertIn("NoNewPrivileges=true", service)
+        self.assertEqual(
+            [line for line in service.splitlines() if line.startswith("CapabilityBoundingSet=")],
+            ["CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_KILL"],
+        )
+        self.assertIn("AmbientCapabilities=\n", service)
+        self.assertIn("PrivateTmp=true", service)
+        self.assertIn("UMask=0077", service)
+        self.assertIn("TimeoutStartSec=7min", service)
+        self.assertIn(
+            "ExecStart=/opt/pinhaoke/venv/bin/python /opt/pinhaoke/deploy/backup_databases.py",
+            service,
+        )
+        for env in (
+            "PINHAOKE_ACCOUNTS_DB=/var/lib/pinhaoke/账户.db",
+            "PINHAOKE_MESSAGES_DB=/var/lib/pinhaoke/留言板.db",
+            "PINHAOKE_STATS_DB=/var/lib/pinhaoke/访问统计.db",
+            "PINHAOKE_BACKUP_DIR=/var/backups/pinhaoke",
+        ):
+            self.assertIn(env, service)
+        timer = self.backup_timer
+        self.assertIn("OnCalendar=", timer)
+        self.assertIn("Persistent=true", timer)
+        self.assertIn("WantedBy=timers.target", timer)
+
+    def test_backup_installation_precreates_private_directory_and_requires_unit_upgrade(self):
+        create = "sudo install -d -o root -g root -m 0700 /var/backups/pinhaoke"
+        start = "sudo systemctl start pinhaoke-backup.service"
+        self.assertIn(create, self.deploy_readme)
+        self.assertLess(self.deploy_readme.index(create), self.deploy_readme.index(start))
+        for fact in ("旧版备份单元", "不能只更新脚本", "只读核实", "获得发布授权",
+                     "CAP_SETUID CAP_SETGID CAP_KILL", "SupplementaryGroups=www-data",
+                     "清空子进程附加组", "mode=ro", "immutable=1"):
+            self.assertIn(fact, self.deploy_readme)
+
+    def test_backup_units_stay_out_of_update_script(self):
+        # 备份单元一次性手工安装，更新脚本不得触碰它们，回滚路径零风险。
+        self.assertNotIn("pinhaoke-backup", self.update)
 
 
 if __name__ == "__main__":

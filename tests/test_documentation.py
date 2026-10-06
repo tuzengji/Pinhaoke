@@ -145,6 +145,9 @@ class DocumentationTests(unittest.TestCase):
             "星期几",
             "两节课的区间",
             "PINHAOKE_MESSAGES_DB",
+            "<库名>.init.lock",
+            "flock",
+            "等待文件锁时不持有 SQLite 读锁",
             "PINHAOKE_STATS_DB",
             "PINHAOKE_ACCOUNTS_DB",
             "StateDirectory",
@@ -192,6 +195,9 @@ class DocumentationTests(unittest.TestCase):
             "不使用左侧彩条",
             "AbortController",
             "lru_cache(maxsize=32)",
+            "_filter_options",
+            "lru_cache(maxsize=6)",
+            "无筛选时全部非空分组已命中",
             "_database_revision",
             "_grouped_course_ctes",
             "_valid_text",
@@ -207,6 +213,8 @@ class DocumentationTests(unittest.TestCase):
             "atomic_database",
             "addToPlan.do",
             "deploy/update.sh",
+            "pinhaoke-backup.timer",
+            "/var/backups/pinhaoke",
         ):
             self.assertIn(fact, text)
         self.assertNotIn("There is no test suite", text)
@@ -300,6 +308,9 @@ class DocumentationTests(unittest.TestCase):
             "StateDirectoryMode=0750",
             "五类本机 API 契约",
             "review-detail 五类烟测",
+            "## 数据备份",
+            "pinhaoke-backup.timer",
+            "backup_databases.py",
         ):
             self.assertIn(fact, deploy)
         self.assertNotIn("本次任务未部署生产", deploy)
