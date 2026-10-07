@@ -129,6 +129,63 @@ class BackupOneTests(unittest.TestCase):
 
 
 class PruneAndRunTests(unittest.TestCase):
+    def test_unset_or_empty_retention_defaults_to_keep_all(self):
+        for value in (None, ""):
+            with self.subTest(environment=value), patch.dict(os.environ):
+                if value is None:
+                    os.environ.pop("PINHAOKE_BACKUP_RETENTION", None)
+                else:
+                    os.environ["PINHAOKE_BACKUP_RETENTION"] = value
+                fresh = importlib.util.module_from_spec(_spec)
+                _spec.loader.exec_module(fresh)
+                self.assertEqual(fresh.DEFAULT_RETENTION, 0)
+
+    def test_nonpositive_retention_preserves_every_snapshot(self):
+        for retention in (0, -1, -14):
+            with self.subTest(retention=retention), tempfile.TemporaryDirectory() as tmp:
+                out = backup.ensure_backup_dir(Path(tmp) / "out")
+                old = {f"账户-2026010{i}-000000.db": bytes([i]) for i in (1, 2, 3)}
+                for name, data in old.items():
+                    (out / name).write_bytes(data)
+                self.assertEqual(backup.prune(out, "账户", retention), [])
+                self.assertEqual({p.name: p.read_bytes() for p in out.iterdir()}, old)
+
+    def test_keep_all_retains_more_than_fourteen_real_snapshots_without_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "source.db"
+            writer = _make_wal_db(src, 0)
+            out = Path(tmp) / "backups"
+            preserved = {}
+            try:
+                for day in range(1, 17):
+                    writer.execute("INSERT INTO t VALUES(?)", (day,))
+                    writer.commit()
+                    created, skipped, failed = backup.run_backup(
+                        [(src, "账户")], out, retention=0, stamp=f"202601{day:02d}-000000"
+                    )
+                    self.assertEqual((skipped, failed), ([], []))
+                    self.assertEqual(len(created), 1)
+                    with closing(sqlite3.connect(created[0])) as conn:
+                        self.assertEqual(conn.execute("SELECT COUNT(*) FROM t").fetchone()[0], day)
+                        self.assertEqual(conn.execute("PRAGMA quick_check").fetchone()[0], "ok")
+                    for name, data in preserved.items():
+                        self.assertEqual((out / name).read_bytes(), data)
+                    preserved[created[0].name] = created[0].read_bytes()
+                    self.assertEqual({p.name for p in out.iterdir()}, set(preserved))
+                self.assertEqual(len(preserved), 16)
+                self.assertEqual(writer.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+            finally:
+                writer.close()
+
+    def test_scheduled_service_keeps_all_and_does_not_start_application(self):
+        lines = (ROOT / "deploy" / "pinhaoke-backup.service").read_text().splitlines()
+        self.assertEqual(
+            [line for line in lines if line.startswith("Environment=PINHAOKE_BACKUP_RETENTION=")],
+            ["Environment=PINHAOKE_BACKUP_RETENTION=0"],
+        )
+        self.assertIn("After=pinhaoke.service", lines)
+        self.assertFalse(any(line.startswith(("Wants=", "Requires=")) for line in lines))
+
     def assert_failed_reader_preserves_snapshots(self, reader):
         with tempfile.TemporaryDirectory() as tmp:
             out = backup.ensure_backup_dir(Path(tmp) / "out")

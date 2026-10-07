@@ -1,7 +1,6 @@
 [Unit]
 Description=Pinhaoke writable-database backup
 After=pinhaoke.service
-Wants=pinhaoke.service
 
 [Service]
 Type=oneshot
@@ -13,7 +12,8 @@ Environment=PINHAOKE_ACCOUNTS_DB=/var/lib/pinhaoke/账户.db
 Environment=PINHAOKE_MESSAGES_DB=/var/lib/pinhaoke/留言板.db
 Environment=PINHAOKE_STATS_DB=/var/lib/pinhaoke/访问统计.db
 Environment=PINHAOKE_BACKUP_DIR=/var/backups/pinhaoke
-Environment=PINHAOKE_BACKUP_RETENTION=14
+# 初期定时备份保留全部快照，明确禁用自动清理。
+Environment=PINHAOKE_BACKUP_RETENTION=0
 ExecStart=/opt/pinhaoke/venv/bin/python /opt/pinhaoke/deploy/backup_databases.py
 
 # 父进程保留 root-only 副本；降权读取者需创建 www-data 所属的 WAL/SHM。

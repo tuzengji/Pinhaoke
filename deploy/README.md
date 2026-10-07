@@ -169,7 +169,9 @@ sudo systemctl reload nginx
 
 三个可写库（`账户.db`、`留言板.db`、`访问统计.db`）由 `deploy/backup_databases.py` 定时快照，脚本随 `update.sh` 部署到 `/opt/pinhaoke/deploy/`，只用标准库，不产生任何 API 费用。
 
-机制：root 父进程为每个源库启动 `www-data` UID/GID 的读取子进程，并清空子进程附加组。读取者以 `mode=ro` 和 `PRAGMA query_only = ON` 打开源库，调用 SQLite Online Backup 把未检查点的 WAL 数据一并写入私有临时快照，仅把临时快照切换为 `DELETE` 模式后再通过 stdout 流出字节。stdout 只接到父进程已打开的私有文件描述符，不给读取者备份目录访问权；父进程检查退出码和 SQLite 文件头、同步文件并用 `PRAGMA quick_check` 校验后，原子落盘为带北京时间戳的文件名（如 `账户-YYYYMMDD-HHMMSS.db`）。每个库各自滚动保留 `14` 份，读取者失败或超时不会发布副本、不会清理已有备份。
+机制：root 父进程为每个源库启动 `www-data` UID/GID 的读取子进程，并清空子进程附加组。读取者以 `mode=ro` 和 `PRAGMA query_only = ON` 打开源库，调用 SQLite Online Backup 把未检查点的 WAL 数据一并写入私有临时快照，仅把临时快照切换为 `DELETE` 模式后再通过 stdout 流出字节。stdout 只接到父进程已打开的私有文件描述符，不给读取者备份目录访问权；父进程检查退出码和 SQLite 文件头、同步文件并用 `PRAGMA quick_check` 校验后，原子落盘为带北京时间戳的文件名（如 `账户-YYYYMMDD-HHMMSS.db`）。默认保留全部快照，读取者失败或超时不会发布副本、不会清理已有备份。
+
+保留策略：`PINHAOKE_BACKUP_RETENTION` 未设置或为空时默认 `0`，`0` 和负值均不清理旧快照；初期定时 service 明确设为 `0`。正值表示按每个库分别保留时间戳最大的指定份数，仅留作将来单独授权后的手动清理入口，不在初期定时模式使用。启用备份本身不授权删除历史快照，后续清理须另行决定范围与保留份数。
 
 `mode=ro` 不等于禁止创建 `-wal`/`-shm`。空闲 WAL 库的最后一个连接关闭后，辅助文件可能已删除；因此读取者必须能在 `/var/lib/pinhaoke` 中创建它们，并以 `www-data` 身份保持正确属主。源 SQL 连接始终只读；不能以 `immutable=1` 或裸复制主库代替在线备份，否则可能漏掉实时 WAL 数据。
 
@@ -177,7 +179,7 @@ sudo systemctl reload nginx
 
 `pinhaoke-backup.service` 为 `Type=oneshot`、`User=root`、`Group=root`，保留 `NoNewPrivileges=true`、`ProtectSystem=strict`、`PrivateTmp=true` 和空 `AmbientCapabilities`。`CapabilityBoundingSet` 仅允许 `CAP_SETUID CAP_SETGID CAP_KILL`：前两项供子进程切换身份及清空附加组，`CAP_KILL` 允许父进程在超时时终止已降权的读取者；不授予绕过文件权限的 DAC capability。父进程的 `SupplementaryGroups=www-data` 允许读取/遍历现有 `www-data:www-data` 的 `0750` 数据目录和 `0640` 数据文件，不改变备份的 root 属主。可写 namespace 仅放行 `/var/backups/pinhaoke` 与 `/var/lib/pinhaoke`，源目录的普通文件权限仍生效。每个读取者超时为 120 秒，单元总超时为 7 分钟；超时后父临时副本被清理，子进程私有临时目录随单元停止回收。
 
-`pinhaoke-backup.timer` 以 `OnCalendar=*-*-* 04,16:20:00` 每天错峰两次、`Persistent=true` 在错过后补跑，使用服务器时区。两个单元一次性手工安装，`update.sh` 只更新脚本和模板，不安装它们。先预建目录，再安装和启动：
+`pinhaoke-backup.timer` 以 `OnCalendar=*-*-* 04,16:20:00` 每天错峰两次、`Persistent=true` 在错过后补跑，使用服务器时区。备份 service 只保留 `After=pinhaoke.service` 排序，不设置 `Wants` 或 `Requires`，所以启动备份不会同时启动应用。两个单元一次性手工安装，`update.sh` 只更新脚本和模板，不安装它们。以下为待逐项授权的操作参考；目录/权限变更、单元安装、单次试运行和定时器启用须分别决定，不能把准备好模板视为授权：
 
 ```bash
 sudo install -d -o root -g root -m 0700 /var/backups/pinhaoke

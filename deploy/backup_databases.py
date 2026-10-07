@@ -2,7 +2,7 @@
 """拼好课三个可写数据库的服务器本机在线备份。
 
 只用标准库。对每个 SQLite 库以只读连接做一致性在线快照（``source.backup``），
-校验副本后原子落盘为带时间戳的文件名，并按保留窗口滚动清理旧快照。目标目录与
+校验副本后原子落盘为带时间戳的文件名，默认保留全部旧快照。目标目录与
 副本文件权限锁到 root-only，因为账户库保存密码与会话哈希。
 
 源连接使用 ``mode=ro`` 和 ``query_only``，但 SQLite 仍可能创建 WAL/SHM 辅助文件。
@@ -29,8 +29,8 @@ from pathlib import Path
 DEFAULT_BACKUP_DIR = Path(
     os.environ.get("PINHAOKE_BACKUP_DIR", "") or "/var/backups/pinhaoke"
 )
-# 每个库各自保留的最近快照份数。库极小，滚动多份以免坏备份覆盖好备份。
-DEFAULT_RETENTION = int(os.environ.get("PINHAOKE_BACKUP_RETENTION", "") or "14")
+# 非正值保留全部快照；正值只供将来另行授权的手动清理，初期定时服务固定为 0。
+DEFAULT_RETENTION = int(os.environ.get("PINHAOKE_BACKUP_RETENTION", "") or "0")
 BEIJING = timezone(timedelta(hours=8))
 READER_TIMEOUT_SECONDS = 120
 SOURCE_MISSING_EXIT = 3
@@ -180,11 +180,11 @@ def backup_one(source_path, backup_dir, prefix, stamp) -> Path:
 
 
 def prune(backup_dir, prefix, retention) -> list:
-    """只保留某个库最近 retention 份快照，返回被删除的路径。"""
+    """非正值不清理；正值只保留某个库最近 retention 份，返回被删除的路径。"""
+    if retention <= 0:
+        return []
     backup_dir = Path(backup_dir)
     snapshots = sorted(backup_dir.glob(f"{prefix}-*.db"))
-    if retention < 0:
-        retention = 0
     removed = []
     for path in snapshots[: max(0, len(snapshots) - retention)]:
         os.unlink(path)
@@ -195,14 +195,15 @@ def prune(backup_dir, prefix, retention) -> list:
 
 
 def run_backup(sources, backup_dir, retention, stamp=None):
-    """备份全部源库并按保留窗口清理，返回 (成功列表, 跳过列表, 失败列表)。"""
+    """备份全部源库；仅正 retention 清理，返回 (成功列表, 跳过列表, 失败列表)。"""
     stamp = stamp or timestamp()
     backup_dir = ensure_backup_dir(backup_dir)
     created, skipped, failed = [], [], []
     for source_path, prefix in sources:
         try:
             created.append(backup_one(source_path, backup_dir, prefix, stamp))
-            prune(backup_dir, prefix, retention)
+            if retention > 0:
+                prune(backup_dir, prefix, retention)
         except FileNotFoundError:
             skipped.append((Path(source_path), prefix))
         except Exception as exc:  # noqa: BLE001 - 汇总后统一退出码
