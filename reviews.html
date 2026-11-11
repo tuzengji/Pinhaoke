@@ -100,10 +100,12 @@ html[data-theme="dark"] body::before {
 .project-nav {
   display: flex;
   flex-wrap: wrap;
-  gap: 0 4px;
-  max-width: 1120px;
+  justify-content: center;
+  gap: 0 8px;
+  width: min(1064px, calc(100% - 56px));
   margin: 0 auto;
-  padding: 4px 28px 0;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
 }
 .project-nav a {
   display: inline-flex;
@@ -121,10 +123,10 @@ html[data-theme="dark"] body::before {
 .project-nav a:hover, .project-nav a:focus-visible { background: var(--bg); color: var(--accent-deep); }
 .project-nav a:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 @media (max-width: 640px) {
-  .project-nav { padding: 0 16px; }
-  .project-nav a { flex: 1 0 auto; min-height: 44px; padding-inline: 4px; }
+  .project-nav { width: calc(100% - 32px); padding: 0 0 2px; }
+  .project-nav a { min-height: 44px; padding-inline: 4px; }
 }
-@media (max-width: 390px) { .project-nav { padding-inline: 12px; } }
+@media (max-width: 390px) { .project-nav { width: calc(100% - 24px); } }
 .brand { display: inline-flex; align-items: center; gap: 10px; min-width: 0; color: var(--ink); text-decoration: none; }
 .brand img { width: 30px; height: 30px; flex: 0 0 auto; border-radius: 22%; }
 .brand-name { font-weight: 700; font-size: 1.05rem; white-space: nowrap; }
