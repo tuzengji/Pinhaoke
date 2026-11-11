@@ -97,6 +97,34 @@ html[data-theme="dark"] body::before {
 .topbar { position: sticky; top: 0; z-index: 500; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 86%, transparent); backdrop-filter: blur(14px); }
 .topbar::after { content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px; pointer-events: none; background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 40%, transparent), color-mix(in srgb, var(--accent) 12%, transparent) 40%, transparent 78%); }
 .topbar-inner { width: min(1120px, 100%); height: 58px; margin: 0 auto; padding: 0 28px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.project-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 4px;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 4px 28px 0;
+}
+.project-nav a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 4px 10px;
+  border-radius: 7px;
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.project-nav a:hover, .project-nav a:focus-visible { background: var(--bg); color: var(--accent-deep); }
+.project-nav a:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (max-width: 640px) {
+  .project-nav { padding: 0 16px; }
+  .project-nav a { flex: 1 0 auto; min-height: 44px; padding-inline: 4px; }
+}
+@media (max-width: 390px) { .project-nav { padding-inline: 12px; } }
 .brand { display: inline-flex; align-items: center; gap: 10px; min-width: 0; color: var(--ink); text-decoration: none; }
 .brand img { width: 30px; height: 30px; flex: 0 0 auto; border-radius: 22%; }
 .brand-name { font-weight: 700; font-size: 1.05rem; white-space: nowrap; }
@@ -691,6 +719,12 @@ body::before { animation: none; filter: none; }
 </head>
 <body>
 <header class="topbar">
+  <nav class="project-nav" aria-label="项目导航">
+    <a href="https://pkuknow.cn/">北大知道</a>
+    <a href="https://pkuknow.cn/thu/">清华知道</a>
+    <a href="https://pkuknow.cn/job/">海王求职</a>
+    <a href="https://shouyulove.cn/where-to-study/">去哪儿自习</a>
+  </nav>
   <div class="topbar-inner">
     <a class="brand" href="/" aria-label="返回拼好课课程搜索">
       <img src="/Images/favicon-192.png?v=2" alt="拼好课">
