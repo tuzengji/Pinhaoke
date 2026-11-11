@@ -714,7 +714,10 @@ class DeployContractTests(unittest.TestCase):
             [line for line in service.splitlines() if line.startswith("CapabilityBoundingSet=")],
             ["CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_KILL"],
         )
-        self.assertIn("AmbientCapabilities=\n", service)
+        self.assertEqual(
+            [line for line in service.splitlines() if line.startswith("AmbientCapabilities=")],
+            ["AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_KILL"],
+        )
         self.assertIn("PrivateTmp=true", service)
         self.assertIn("UMask=0077", service)
         self.assertIn("TimeoutStartSec=7min", service)

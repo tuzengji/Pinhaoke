@@ -32,6 +32,6 @@ LockPersonality=true
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_KILL
-AmbientCapabilities=
+AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_KILL
 UMask=0077
 TimeoutStartSec=7min
