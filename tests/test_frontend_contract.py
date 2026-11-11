@@ -335,8 +335,14 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn('这里用于补充或修正课程信息', HTML)
         self.assertIn("history.pushState({ phk: 'coursecorrection' }", function_body('openCourseCorrection'))
         summary_style = re.search(r'\.course-message-summary \{([^}]+)\}', HTML).group(1)
-        self.assertIn('border: 2px solid', summary_style)
+        self.assertIn('border: 1px solid var(--border-soft)', summary_style)
+        self.assertNotIn('2px solid', summary_style)
         self.assertNotIn('border-left', summary_style)
+        has_notes_style = re.search(r'\.course-message-summary\.has-notes \{([^}]+)\}', HTML).group(1)
+        self.assertIn('border: 2px solid #18B89A', has_notes_style)
+        self.assertIn("summary.classList.toggle('has-notes', course.has_course_corrections === true)", body)
+        self.assertIn("summary.classList.toggle('has-notes', total > 0)", body)
+        self.assertIn("summary.classList.add('has-notes')", body)
 
     def test_course_correction_status_updates_matching_cards_without_duplicates(self):
         self.assertIn('setCourseCorrectionIndicator(card, course.has_course_corrections === true)', function_body('createCard'))
@@ -1433,28 +1439,56 @@ class FrontendContractTests(unittest.TestCase):
         self.assertEqual(HTML.count("periodLabel: (a, b) =>"), 8)
         self.assertIn("#labelPeriod { --fl-icon:", HTML)
         self.assertIn("csValues.filterPeriod     = p.get('period') || '';", HTML)
+        self.assertIn("csValues.filterPeriodMode = p.get('period_mode') === 'within' ? 'within' : '';", HTML)
         self.assertIn("p.set('period', csValues.filterPeriod)", HTML)
+        self.assertIn("p.set('period_mode', 'within')", HTML)
         self.assertIn("params.set('period', csValues.filterPeriod)", HTML)
+        self.assertIn("params.set('period_mode', 'within')", HTML)
+        self.assertIn("buildWeekdaySelect('csWeekday', csValues.filterWeekday);", HTML)
+        self.assertIn("buildPeriodSelect('csPeriod'", HTML)
         self.assertIn("(filters.periods || []).map(p => ({ value: p, label: fmtPeriod(p) }))", HTML)
-        self.assertIn("'filterDepartment', 'filterWeekday', 'filterPeriod', 'filterGrading'", HTML)
+        self.assertIn("'filterDepartment', 'filterWeekday', 'filterPeriod', 'filterPeriodMode', 'filterGrading'", HTML)
         self.assertIn("document.getElementById('labelPeriod').textContent = lang.labelPeriod;", HTML)
+        self.assertIn("items.push({ k: 'filterWeekday', label: fmtWeekday(csValues.filterWeekday) })", HTML)
         self.assertIn("items.push({ k: 'filterPeriod', label: fmtPeriod(csValues.filterPeriod) })", HTML)
-        source = function_source("fmtPeriod")
+        self.assertIn("items.push({ k: 'filterPeriodMode', label: '仅在所选时段内' })", HTML)
         self.run_node(
             f"""
             const assert = require('node:assert/strict');
+            const WEEKDAYS_CN = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
             let currentLang = 'zh';
             const i18n = {{
-              zh: {{ periodLabel: (a, b) => a === b ? `第${{a}}节` : `${{a}}-${{b}}节` }},
-              en: {{ periodLabel: (a, b) => a === b ? `Period ${{a}}` : `Periods ${{a}}-${{b}}` }},
+              zh: {{
+                weekdays: WEEKDAYS_CN,
+                periodLabel: (a, b) => a === b ? `第${{a}}节` : `${{a}}-${{b}}节`,
+              }},
+              en: {{
+                weekdays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+                periodLabel: (a, b) => a === b ? `Period ${{a}}` : `Periods ${{a}}-${{b}}`,
+              }},
             }};
-            {source}
+            {function_source("parseWeekdaySelection")}
+            {function_source("serializeWeekdays")}
+            {function_source("fmtWeekday")}
+            {function_source("parsePeriodSelection")}
+            {function_source("serializePeriods")}
+            {function_source("fmtPeriod")}
+            assert.equal(fmtPeriod('5'), '第5节');
             assert.equal(fmtPeriod('10-11'), '10-11节');
             assert.equal(fmtPeriod('7-7'), '第7节');
+            assert.equal(fmtPeriod('1-2,5-6'), '1-2、5-6节');
+            assert.equal(fmtPeriod('1,3,5'), '第1、3、5节');
             assert.equal(fmtPeriod('bogus'), 'bogus');
             assert.equal(fmtPeriod(null), '');
+            assert.equal(serializePeriods(parsePeriodSelection('6,5,2,1,8')), '1-2,5-6,8');
+            assert.equal(serializeWeekdays(parseWeekdaySelection('周四,周二')), '周二,周四');
+            assert.equal(fmtWeekday('周二,周四'), '周二、周四');
+            assert.equal(fmtWeekday('周一,周二,周三,周四,周五'), '周一至周五');
+            assert.equal(fmtWeekday('周六,周日'), '周六、周日');
+            assert.equal(fmtWeekday('周一,周三,周五'), '周一/三/五');
             currentLang = 'en';
             assert.equal(fmtPeriod('3-4'), 'Periods 3-4');
+            assert.equal(fmtPeriod('1-2,5'), 'Periods 1-2, Period 5');
             """
         )
 

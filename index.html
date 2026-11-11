@@ -924,6 +924,112 @@ html[data-theme="dark"] .filters::before {
 .cs-compact .custom-select-trigger { padding: 7px 30px 7px 12px; font-size: 0.84rem; background-color: var(--surface); }
 .cs-compact .custom-select-dropdown { left: auto; right: 0; min-width: 170px; }
 
+/* multi-select schedule panels (weekday & period) */
+.cs-multi-dropdown { padding: 10px; z-index: 320; }
+.cs-weekday-dropdown { left: 0; right: auto; width: max(100%, 268px); }
+.cs-period-dropdown { left: 0; right: auto; width: max(100%, 308px); }
+@media (max-width: 900px) { .cs-weekday-dropdown { left: auto; right: 0; } }
+@media (max-width: 720px) {
+  .cs-weekday-dropdown { left: auto; right: 0; width: calc(200% + 12px); }
+  .cs-period-dropdown { left: 0; right: auto; width: calc(200% + 12px); }
+}
+.cs-quick-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.cs-quick-btn {
+  flex: 1 1 auto;
+  padding: 5px 7px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--ink-3);
+  font-size: 0.74rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.cs-quick-btn:hover { border-color: var(--border-2); color: var(--ink); background: var(--surface); }
+.cs-quick-btn.active {
+  border-color: var(--accent);
+  background: var(--accent-mist);
+  color: var(--accent);
+}
+.cs-pill-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+.cs-pill-btn {
+  padding: 7px 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 0.8rem;
+  font-weight: 500;
+  text-align: center;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.cs-pill-btn:hover { background: var(--bg); border-color: var(--border-2); color: var(--ink); }
+.cs-pill-btn.active {
+  border-color: var(--accent);
+  background: var(--accent-mist);
+  color: var(--accent);
+  font-weight: 700;
+}
+.cs-pill-btn:focus-visible,
+.cs-quick-btn:focus-visible,
+.cs-mode-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.cs-mode-section {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-soft);
+}
+.cs-mode-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 3px;
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+}
+.cs-mode-btn {
+  padding: 5px 6px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 0.74rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+.cs-mode-btn:hover { color: var(--ink); }
+.cs-mode-btn.active {
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: var(--shadow-xs);
+}
+.cs-mode-hint {
+  margin: 6px 2px 0;
+  color: var(--ink-3);
+  font-size: 0.71rem;
+  line-height: 1.45;
+}
+
 /* ============================================================
    ACTIVE FILTER CHIPS
    ============================================================ */
@@ -1720,8 +1826,9 @@ html[data-theme="dark"] .sponsor-amount { color: #FB7185; }
   letter-spacing: 0;
 }
 
-.course-message-summary { margin: 0 0 14px; padding: 8px 12px; border: 2px solid #18B89A; border-radius: 6px; background: var(--accent-mist); }
-html[data-theme="dark"] .course-message-summary { border-color: #43E4BE; }
+.course-message-summary { margin: 0 0 14px; padding: 8px 12px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--bg); }
+.course-message-summary.has-notes { border: 2px solid #18B89A; background: var(--accent-mist); }
+html[data-theme="dark"] .course-message-summary.has-notes { border-color: #43E4BE; }
 .course-message-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .course-message-label { font-size: 0.74rem; font-weight: 700; color: var(--ink-2); }
 .course-correction-button { padding: 4px 8px; border-radius: 5px; background: var(--surface); border: 1px solid var(--border); color: var(--accent); font-size: 0.74rem; font-weight: 600; white-space: nowrap; }
@@ -3382,6 +3489,7 @@ function readURLState() {
   csValues.filterDepartment = p.get('dept') || '';
   csValues.filterWeekday    = p.get('day') || '';
   csValues.filterPeriod     = p.get('period') || '';
+  csValues.filterPeriodMode = p.get('period_mode') === 'within' ? 'within' : '';
   csValues.filterGrading    = p.get('grading') || '';
   csValues.filterSort       = p.get('sort') || '';
   if (csValues.filterSort === 'random') {
@@ -3403,6 +3511,9 @@ function syncURL() {
   if (csValues.filterDepartment) p.set('dept', csValues.filterDepartment);
   if (csValues.filterWeekday)    p.set('day', csValues.filterWeekday);
   if (csValues.filterPeriod)     p.set('period', csValues.filterPeriod);
+  if (csValues.filterPeriodMode === 'within' && (csValues.filterWeekday || csValues.filterPeriod)) {
+    p.set('period_mode', 'within');
+  }
   if (csValues.filterGrading)    p.set('grading', csValues.filterGrading);
   if (csValues.filterSort) {
     p.set('sort', csValues.filterSort);
@@ -3701,8 +3812,8 @@ function openCustomSelect(container, preferred = 'active') {
   container.classList.add('open');
   const trigger = container.querySelector('.custom-select-trigger');
   trigger.setAttribute('aria-expanded', 'true');
-  const options = [...container.querySelectorAll('.custom-select-option')].filter(option => !option.hidden);
-  const active = container.querySelector('.custom-select-option.active');
+  const options = [...container.querySelectorAll('.custom-select-option, .cs-pill-btn')].filter(option => !option.hidden);
+  const active = container.querySelector('.custom-select-option.active, .cs-pill-btn.active');
   const target = preferred === 'first'
     ? options[0]
     : (preferred === 'last' ? options[options.length - 1] : (active && !active.hidden ? active : options[0]));
@@ -3854,6 +3965,342 @@ function closeAllSelects(except) {
   });
 }
 
+const PERIOD_QUICK_GROUPS = [
+  { key: 'morning',   label: '上午 1-4',   periods: [1, 2, 3, 4] },
+  { key: 'afternoon', label: '下午 5-9',   periods: [5, 6, 7, 8, 9] },
+  { key: 'evening',   label: '晚上 10-12', periods: [10, 11, 12] },
+];
+
+function parseWeekdaySelection(raw) {
+  const selected = new Set();
+  if (!raw) return selected;
+  String(raw).split(',').map(s => s.trim()).forEach(w => {
+    if (WEEKDAYS_CN.includes(w)) selected.add(w);
+  });
+  return selected;
+}
+
+function serializeWeekdays(selected) {
+  return WEEKDAYS_CN.filter(w => selected.has(w)).join(',');
+}
+
+function fmtWeekday(raw) {
+  const rawStr = raw == null ? '' : String(raw).trim();
+  if (!rawStr) return '';
+  const selected = parseWeekdaySelection(rawStr);
+  if (!selected.size) return rawStr;
+  const ordered = WEEKDAYS_CN.filter(w => selected.has(w));
+  const lang = i18n[currentLang];
+  if (ordered.length === 1) {
+    const idx = WEEKDAYS_CN.indexOf(ordered[0]);
+    return idx >= 0 ? lang.weekdays[idx] : ordered[0];
+  }
+  if (currentLang === 'zh') {
+    if (ordered.join(',') === '周一,周二,周三,周四,周五') return '周一至周五';
+    if (ordered.join(',') === '周六,周日') return '周六、周日';
+    if (ordered.length === 2) return ordered.join('、');
+    return '周' + ordered.map(w => w.slice(1)).join('/');
+  }
+  return ordered.map(w => lang.weekdays[WEEKDAYS_CN.indexOf(w)] || w).join(', ');
+}
+
+function parsePeriodSelection(raw) {
+  const selected = new Set();
+  if (!raw) return selected;
+  for (const token of String(raw).split(',').map(s => s.trim()).filter(Boolean)) {
+    const single = /^(\d{1,2})$/.exec(token);
+    if (single) {
+      const n = Number(single[1]);
+      if (n >= 1 && n <= 14) selected.add(n);
+      continue;
+    }
+    const range = /^(\d{1,2})-(\d{1,2})$/.exec(token);
+    if (range) {
+      const a = Number(range[1]), b = Number(range[2]);
+      if (a >= 1 && a <= b && b <= 14) {
+        for (let p = a; p <= b; p++) selected.add(p);
+      }
+    }
+  }
+  return selected;
+}
+
+function serializePeriods(selected) {
+  const nums = [...selected].filter(n => Number.isInteger(n) && n >= 1 && n <= 14).sort((a, b) => a - b);
+  if (!nums.length) return '';
+  const ranges = [];
+  let start = nums[0], end = nums[0];
+  for (let i = 1; i < nums.length; i++) {
+    if (nums[i] === end + 1) {
+      end = nums[i];
+    } else {
+      ranges.push(start === end ? String(start) : `${start}-${end}`);
+      start = end = nums[i];
+    }
+  }
+  ranges.push(start === end ? String(start) : `${start}-${end}`);
+  return ranges.join(',');
+}
+
+function syncScheduleControls() {
+  const lang = i18n[currentLang];
+  const daySet = parseWeekdaySelection(csValues.filterWeekday);
+  const periodSet = parsePeriodSelection(csValues.filterPeriod);
+  const within = csValues.filterPeriodMode === 'within';
+
+  const dayContainer = document.getElementById('csWeekday');
+  if (dayContainer) {
+    const trigger = dayContainer.querySelector('.custom-select-trigger');
+    if (trigger) {
+      const base = fmtWeekday(csValues.filterWeekday);
+      trigger.textContent = base ? (within && !csValues.filterPeriod ? `${base}（仅限内）` : base) : lang.all;
+    }
+    dayContainer.querySelectorAll('.cs-pill-btn[data-day]').forEach(btn => {
+      const active = daySet.has(btn.dataset.day);
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+    const workdays = ['周一', '周二', '周三', '周四', '周五'];
+    const weekend = ['周六', '周日'];
+    dayContainer.querySelectorAll('.cs-quick-btn[data-preset]').forEach(btn => {
+      const p = btn.dataset.preset;
+      const active = p === 'all' ? daySet.size === 0
+        : p === 'workday' ? workdays.every(d => daySet.has(d)) && daySet.size === 5
+        : weekend.every(d => daySet.has(d)) && daySet.size === 2;
+      btn.classList.toggle('active', active);
+    });
+  }
+
+  const periodContainer = document.getElementById('csPeriod');
+  if (periodContainer) {
+    const trigger = periodContainer.querySelector('.custom-select-trigger');
+    if (trigger) {
+      const base = fmtPeriod(csValues.filterPeriod);
+      trigger.textContent = base ? (within ? `${base}（仅限内）` : base) : lang.all;
+    }
+    const availableNums = [...periodContainer.querySelectorAll('.cs-pill-btn[data-period]')]
+      .map(btn => Number(btn.dataset.period));
+    periodContainer.querySelectorAll('.cs-pill-btn[data-period]').forEach(btn => {
+      const active = periodSet.has(Number(btn.dataset.period));
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+    periodContainer.querySelectorAll('.cs-quick-btn[data-preset]').forEach(btn => {
+      const key = btn.dataset.preset;
+      if (key === 'all') {
+        btn.classList.toggle('active', periodSet.size === 0);
+        return;
+      }
+      const group = PERIOD_QUICK_GROUPS.find(g => g.key === key);
+      const present = group ? group.periods.filter(n => availableNums.includes(n)) : [];
+      const active = present.length > 0 && present.every(n => periodSet.has(n));
+      btn.classList.toggle('active', active);
+    });
+  }
+
+  document.querySelectorAll('.cs-mode-section').forEach(section => {
+    section.querySelectorAll('.cs-mode-btn').forEach(btn => {
+      const active = (btn.dataset.mode === 'within') === within;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+    const hint = section.querySelector('.cs-mode-hint');
+    if (hint) {
+      hint.textContent = within
+        ? '凑空档模式：课程所有上课时间均须落在所选时段内，不超出冲突'
+        : '包含模式：所选节次正在上课的课程都会显示（支持多选）';
+    }
+  });
+}
+
+function attachMultiDropdownBehavior(container) {
+  const trigger = container.querySelector('.custom-select-trigger');
+  const dropdown = container.querySelector('.custom-select-dropdown');
+  if (container._focusOutHandler) {
+    container.removeEventListener('focusout', container._focusOutHandler);
+  }
+  container._focusOutHandler = event => handleCustomSelectFocusOut(container, event);
+  container.addEventListener('focusout', container._focusOutHandler);
+
+  trigger.addEventListener('click', e => {
+    e.stopPropagation();
+    if (container.classList.contains('open')) closeCustomSelect(container, true);
+    else openCustomSelect(container);
+  });
+  trigger.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      openCustomSelect(container);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeCustomSelect(container, true);
+    }
+  });
+  dropdown.addEventListener('click', e => e.stopPropagation());
+  dropdown.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeCustomSelect(container, true);
+    }
+  });
+}
+
+function modeSectionHTML() {
+  return `<div class="cs-mode-section">` +
+    `<div class="cs-mode-switch" role="group" aria-label="时间匹配方式">` +
+    `<button type="button" class="cs-mode-btn" data-mode="overlap">包含所选节次</button>` +
+    `<button type="button" class="cs-mode-btn" data-mode="within">仅在所选时段内</button>` +
+    `</div>` +
+    `<p class="cs-mode-hint"></p>` +
+    `</div>`;
+}
+
+function bindModeSwitch(container) {
+  container.querySelectorAll('.cs-mode-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const next = btn.dataset.mode === 'within' ? 'within' : '';
+      if ((csValues.filterPeriodMode || '') === next) return;
+      csValues.filterPeriodMode = next;
+      syncScheduleControls();
+      if (csValues.filterWeekday || csValues.filterPeriod) applyFilters();
+    });
+  });
+}
+
+function buildWeekdaySelect(containerId, defaultValue) {
+  const container = document.getElementById(containerId);
+  const lang = i18n[currentLang];
+  const parsed = parseWeekdaySelection(defaultValue);
+  csValues.filterWeekday = parsed.size ? serializeWeekdays(parsed) : (defaultValue || '');
+  const labelId = container.closest('.filter-group')?.querySelector('label')?.id || '';
+  const dialogId = containerId + 'Panel';
+
+  let html = `<div class="custom-select-trigger" tabindex="0" role="combobox" aria-haspopup="dialog" aria-expanded="false" aria-controls="${dialogId}" aria-labelledby="${esc(labelId)}">${esc(fmtWeekday(csValues.filterWeekday) || lang.all)}</div>`;
+  html += `<div class="custom-select-dropdown cs-multi-dropdown cs-weekday-dropdown" id="${dialogId}" role="group" aria-labelledby="${esc(labelId)}">`;
+  html += `<div class="cs-quick-bar">`;
+  html += `<button type="button" class="cs-quick-btn" data-preset="all">${esc(lang.all)}</button>`;
+  html += `<button type="button" class="cs-quick-btn" data-preset="workday">工作日</button>`;
+  html += `<button type="button" class="cs-quick-btn" data-preset="weekend">周末</button>`;
+  html += `</div>`;
+  html += `<div class="cs-pill-grid">`;
+  WEEKDAYS_CN.forEach((w, i) => {
+    html += `<button type="button" class="cs-pill-btn" data-day="${esc(w)}">${esc(lang.weekdays[i])}</button>`;
+  });
+  html += `</div>`;
+  html += modeSectionHTML();
+  html += `</div>`;
+  container.innerHTML = html;
+
+  attachMultiDropdownBehavior(container);
+  bindModeSwitch(container);
+
+  container.querySelectorAll('.cs-pill-btn[data-day]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const set = parseWeekdaySelection(csValues.filterWeekday);
+      const day = btn.dataset.day;
+      if (set.has(day)) set.delete(day); else set.add(day);
+      csValues.filterWeekday = serializeWeekdays(set);
+      if (!csValues.filterWeekday && !csValues.filterPeriod) csValues.filterPeriodMode = '';
+      syncScheduleControls();
+      applyFilters();
+    });
+  });
+
+  container.querySelectorAll('.cs-quick-btn[data-preset]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const preset = btn.dataset.preset;
+      if (preset === 'all') {
+        csValues.filterWeekday = '';
+        if (!csValues.filterPeriod) csValues.filterPeriodMode = '';
+      } else {
+        const group = preset === 'workday' ? ['周一', '周二', '周三', '周四', '周五'] : ['周六', '周日'];
+        const set = parseWeekdaySelection(csValues.filterWeekday);
+        const allSelected = group.every(d => set.has(d)) && set.size === group.length;
+        csValues.filterWeekday = allSelected ? '' : serializeWeekdays(new Set(group));
+        if (!csValues.filterWeekday && !csValues.filterPeriod) csValues.filterPeriodMode = '';
+      }
+      syncScheduleControls();
+      applyFilters();
+    });
+  });
+
+  syncScheduleControls();
+}
+
+function buildPeriodSelect(containerId, options, defaultValue) {
+  const container = document.getElementById(containerId);
+  const lang = i18n[currentLang];
+  const parsed = parsePeriodSelection(defaultValue);
+  csValues.filterPeriod = parsed.size ? serializePeriods(parsed) : (defaultValue || '');
+  const labelId = container.closest('.filter-group')?.querySelector('label')?.id || '';
+  const dialogId = containerId + 'Panel';
+
+  let html = `<div class="custom-select-trigger" tabindex="0" role="combobox" aria-haspopup="dialog" aria-expanded="false" aria-controls="${dialogId}" aria-labelledby="${esc(labelId)}">${esc(fmtPeriod(csValues.filterPeriod) || lang.all)}</div>`;
+  html += `<div class="custom-select-dropdown cs-multi-dropdown cs-period-dropdown" id="${dialogId}" role="group" aria-labelledby="${esc(labelId)}">`;
+  html += `<div class="cs-quick-bar">`;
+  html += `<button type="button" class="cs-quick-btn" data-preset="all">${esc(lang.all)}</button>`;
+  PERIOD_QUICK_GROUPS.forEach(g => {
+    html += `<button type="button" class="cs-quick-btn" data-preset="${esc(g.key)}">${esc(g.label)}</button>`;
+  });
+  html += `</div>`;
+  html += `<div class="cs-pill-grid">`;
+  options.forEach(opt => {
+    html += `<button type="button" class="cs-pill-btn" data-period="${esc(opt.value)}">${esc(opt.label)}</button>`;
+  });
+  html += `</div>`;
+  html += modeSectionHTML();
+  html += `</div>`;
+  container.innerHTML = html;
+
+  attachMultiDropdownBehavior(container);
+  bindModeSwitch(container);
+
+  let lastClickedPeriod = null;
+  container.querySelectorAll('.cs-pill-btn[data-period]').forEach(btn => {
+    btn.addEventListener('click', event => {
+      const n = Number(btn.dataset.period);
+      const set = parsePeriodSelection(csValues.filterPeriod);
+      if (event.shiftKey && lastClickedPeriod !== null) {
+        const lo = Math.min(lastClickedPeriod, n), hi = Math.max(lastClickedPeriod, n);
+        for (let p = lo; p <= hi; p++) set.add(p);
+      } else if (set.has(n)) {
+        set.delete(n);
+      } else {
+        set.add(n);
+      }
+      lastClickedPeriod = n;
+      csValues.filterPeriod = serializePeriods(set);
+      if (!csValues.filterWeekday && !csValues.filterPeriod) csValues.filterPeriodMode = '';
+      syncScheduleControls();
+      applyFilters();
+    });
+  });
+
+  const availableSet = new Set(options.map(opt => Number(opt.value)));
+  container.querySelectorAll('.cs-quick-btn[data-preset]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const preset = btn.dataset.preset;
+      if (preset === 'all') {
+        csValues.filterPeriod = '';
+        if (!csValues.filterWeekday) csValues.filterPeriodMode = '';
+      } else {
+        const group = PERIOD_QUICK_GROUPS.find(g => g.key === preset);
+        const present = group ? group.periods.filter(n => availableSet.has(n)) : [];
+        const set = parsePeriodSelection(csValues.filterPeriod);
+        const allIn = present.length > 0 && present.every(n => set.has(n));
+        present.forEach(n => { if (allIn) set.delete(n); else set.add(n); });
+        csValues.filterPeriod = serializePeriods(set);
+        if (!csValues.filterWeekday && !csValues.filterPeriod) csValues.filterPeriodMode = '';
+      }
+      lastClickedPeriod = null;
+      syncScheduleControls();
+      applyFilters();
+    });
+  });
+
+  syncScheduleControls();
+}
+
 function populateFilters(filters) {
   const lang = i18n[currentLang];
 
@@ -3890,14 +4337,12 @@ function populateFilters(filters) {
     filters.gradings.map(g => ({ value: g, label: tr('gradings', g) })),
     lang.all, csValues.filterGrading);
 
-  buildCustomSelect('csWeekday',
-    WEEKDAYS_CN.map((w, i) => ({ value: w, label: lang.weekdays[i] })),
-    lang.all, csValues.filterWeekday);
+  buildWeekdaySelect('csWeekday', csValues.filterWeekday);
 
-  // Period ranges come from the term's own schedule text, so the list covers every course.
-  buildCustomSelect('csPeriod',
+  // Single periods come from the term's own schedule text, so selecting period N shows every course in session then.
+  buildPeriodSelect('csPeriod',
     (filters.periods || []).map(p => ({ value: p, label: fmtPeriod(p) })),
-    lang.all, csValues.filterPeriod);
+    csValues.filterPeriod);
 }
 
 /* ===== Active filter chips ===== */
@@ -3912,11 +4357,11 @@ function chipItems() {
   if (csValues.filterCategory) items.push({ k: 'filterCategory', label: tr('categories', csValues.filterCategory) });
   if (csValues.filterCredits) items.push({ k: 'filterCredits', label: fmtCredits(csValues.filterCredits) + ' ' + lang.fieldCredits });
   if (csValues.filterDepartment) items.push({ k: 'filterDepartment', label: tr('departments', csValues.filterDepartment) });
-  if (csValues.filterWeekday) {
-    const idx = WEEKDAYS_CN.indexOf(csValues.filterWeekday);
-    items.push({ k: 'filterWeekday', label: idx >= 0 ? lang.weekdays[idx] : csValues.filterWeekday });
-  }
+  if (csValues.filterWeekday) items.push({ k: 'filterWeekday', label: fmtWeekday(csValues.filterWeekday) });
   if (csValues.filterPeriod) items.push({ k: 'filterPeriod', label: fmtPeriod(csValues.filterPeriod) });
+  if (csValues.filterPeriodMode === 'within' && (csValues.filterWeekday || csValues.filterPeriod)) {
+    items.push({ k: 'filterPeriodMode', label: '仅在所选时段内' });
+  }
   if (csValues.filterGrading) items.push({ k: 'filterGrading', label: tr('gradings', csValues.filterGrading) });
   return items;
 }
@@ -3946,6 +4391,7 @@ function removeChip(k) {
     document.getElementById('filterClassroom').value = '';
   } else {
     csValues[k] = '';
+    if (!csValues.filterWeekday && !csValues.filterPeriod) csValues.filterPeriodMode = '';
     if (cachedFilters) populateFilters(cachedFilters);
   }
   applyFilters();
@@ -4004,6 +4450,9 @@ async function fetchCourses({ page = 1, append = false } = {}) {
   if (csValues.filterDepartment) params.set('department', csValues.filterDepartment);
   if (csValues.filterWeekday)    params.set('weekday', csValues.filterWeekday);
   if (csValues.filterPeriod)     params.set('period', csValues.filterPeriod);
+  if (csValues.filterPeriodMode === 'within' && (csValues.filterWeekday || csValues.filterPeriod)) {
+    params.set('period_mode', 'within');
+  }
   if (csValues.filterGrading)    params.set('grading', csValues.filterGrading);
   if (sort) params.set('sort', sort);
   if (sort === 'random' && randomSeed) params.set('random_seed', randomSeed);
@@ -4166,12 +4615,26 @@ function fmtCredits(v) {
   return n % 1 === 0 ? n.toFixed(0) : n.toFixed(1);
 }
 
-// "10-11" -> localized "10-11节" / "Periods 10-11"; single-period slots ("7-7") collapse to one number.
+// "5" -> "第5节", "10-11" -> "10-11节", "1-2,5-6" -> "1-2、5-6节"; single-period ranges ("7-7") collapse.
 function fmtPeriod(v) {
-  const raw = v == null ? '' : String(v);
+  const raw = v == null ? '' : String(v).trim();
+  if (!raw) return '';
+  const single = /^(\d{1,2})$/.exec(raw);
+  if (single) return i18n[currentLang].periodLabel(Number(single[1]), Number(single[1]));
   const m = /^(\d{1,2})-(\d{1,2})$/.exec(raw);
-  if (!m) return raw;
-  return i18n[currentLang].periodLabel(Number(m[1]), Number(m[2]));
+  if (m) return i18n[currentLang].periodLabel(Number(m[1]), Number(m[2]));
+  const parts = raw.split(',');
+  if (parts.length > 1 && parts.every(part => /^\d{1,2}(?:-\d{1,2})?$/.test(part))) {
+    if (currentLang === 'zh') {
+      const segs = parts.map(part => {
+        const [a, b] = part.split('-').map(Number);
+        return b === undefined || a === b ? String(a) : `${a}-${b}`;
+      });
+      return (segs.every(s => !s.includes('-')) ? '第' + segs.join('、') : segs.join('、')) + '节';
+    }
+    return parts.map(part => fmtPeriod(part)).join(', ');
+  }
+  return raw;
 }
 
 // List endpoint returns course_type / category as arrays (merged from multiple
@@ -4753,6 +5216,7 @@ function trapCourseCorrectionFocus(event) {
 function mountCourseMessages(host, course) {
   const section = msgElement('div', 'course-messages');
   const summary = msgElement('section', 'course-message-summary');
+  summary.classList.toggle('has-notes', course.has_course_corrections === true);
   summary.setAttribute('aria-label', '课程补充信息');
   const head = msgElement('div', 'course-message-head');
   const title = msgElement('span', 'course-message-label', '课程补充');
@@ -4803,6 +5267,7 @@ function mountCourseMessages(host, course) {
       });
       if (data.messages.length) beforeId = data.messages[data.messages.length - 1].id;
       total = data.total;
+      summary.classList.toggle('has-notes', total > 0);
       syncCourseCorrectionIndicators(course.id, total > 0);
       title.textContent = total ? `课程补充（${total}）` : '课程补充';
       if (reset || beforeId === 0) preview.textContent = data.messages[0]?.content || '有课程变化？点击“修正信息”补充。';
@@ -4835,6 +5300,7 @@ function mountCourseMessages(host, course) {
       input.value = ''; postStatus.textContent = '课程留言已发布';
       list.prepend(renderMessage(message));
       title.textContent = `课程补充（${++total}）`;
+      summary.classList.add('has-notes');
       syncCourseCorrectionIndicators(course.id, true);
       preview.textContent = message.content;
       await load(true);
@@ -7100,7 +7566,7 @@ function clearAll() {
   document.getElementById('searchClear').classList.add('hidden');
   // Reset filter selects; sort is a view preference, not a filter — keep it.
   ['filterCourseType', 'filterCategory', 'filterCredits',
-   'filterDepartment', 'filterWeekday', 'filterPeriod', 'filterGrading'].forEach(k => { csValues[k] = ''; });
+   'filterDepartment', 'filterWeekday', 'filterPeriod', 'filterPeriodMode', 'filterGrading'].forEach(k => { csValues[k] = ''; });
   if (cachedFilters) populateFilters(cachedFilters);
   applyFilters();
 }

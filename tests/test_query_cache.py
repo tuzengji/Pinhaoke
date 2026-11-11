@@ -94,7 +94,7 @@ class QueryCacheTests(unittest.TestCase):
             writer.execute("UPDATE basic_info SET department='原位院系', schedule='每周周二13~14节'")
         payload = json.loads(app.get_filters('summer').body)
         self.assertEqual(payload['departments'], ['原位院系'])
-        self.assertEqual(payload['periods'], ['13-14'])
+        self.assertEqual(payload['periods'], ['13', '14'])
         writer = sqlite3.connect(self.database)
         try:
             writer.execute('PRAGMA journal_mode=WAL')
@@ -102,7 +102,7 @@ class QueryCacheTests(unittest.TestCase):
             writer.commit()
             payload = json.loads(app.get_filters('summer').body)
             self.assertEqual(payload['departments'], ['WAL院系'])
-            self.assertEqual(payload['periods'], ['1-14'])
+            self.assertEqual(payload['periods'], [str(i) for i in range(1, 13)])
         finally:
             writer.close()
         replacement = self.root / 'replacement.db'
@@ -112,7 +112,7 @@ class QueryCacheTests(unittest.TestCase):
         os.replace(replacement, self.database)
         payload = json.loads(app.get_filters('summer').body)
         self.assertEqual(payload['departments'], ['替换院系'])
-        self.assertEqual(payload['periods'], ['7-8'])
+        self.assertEqual(payload['periods'], ['7', '8'])
         self.assertEqual(app._filter_options.cache_info().misses, 4)
 
     def test_public_caches_follow_passive_and_truncate_wal_checkpoints(self):

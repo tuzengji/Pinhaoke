@@ -36,6 +36,7 @@ import secrets
 import sqlite3
 import threading
 import time
+from typing import Annotated
 import unicodedata
 from urllib.parse import urlsplit
 
@@ -127,13 +128,18 @@ TERM_DBS = {
 
 VALID_TERMS = frozenset(TERM_DBS)
 VALID_LANGS = frozenset({"zh", "en", "ja", "ko", "fr", "de", "es", "ru"})
-VALID_WEEKDAYS = frozenset({"", "周一", "周二", "周三", "周四", "周五", "周六", "周日"})
-# Class-period filter values look like "3-4": a session occupying periods 3 through 4.
+WEEKDAY_ORDER = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+VALID_WEEKDAY_SET = frozenset(WEEKDAY_ORDER)
+VALID_WEEKDAYS = frozenset({"", *WEEKDAY_ORDER})
+VALID_PERIOD_MODES = frozenset({"", "overlap", "within"})
+# Class-period filter tokens accept single periods ("5"), ranges ("3-4"), or comma lists ("1-2,5,7-8").
 # PKU numbers periods 1-13; 14 is accepted as headroom, matching parse_first_period().
 PERIOD_RANGE_RE = re.compile(r"^(?:[1-9]|1[0-4])-(?:[1-9]|1[0-4])$")
+PERIOD_TOKEN_RE = re.compile(r"^(?:[1-9]|1[0-4])(?:-(?:[1-9]|1[0-4]))?$")
 # Every schedule slot is written as "周X" immediately followed by "N~M节" (verified across
 # all five course databases), so the weekday token doubles as the left boundary of a range.
 SCHEDULE_PERIOD_RE = re.compile(r"周[一二三四五六日](\d{1,2})~(\d{1,2})节")
+SCHEDULE_SLOT_RE = re.compile(r"(周[一二三四五六日])(\d{1,2})~(\d{1,2})节")
 VALID_SORTS = frozenset({
     "", "name_asc", "name_desc", "pinyin", "pinyin_desc",
     "credits_asc", "credits_desc", "time_asc", "random",
@@ -195,6 +201,7 @@ def get_db(term: str = "fall"):
     try:
         conn = sqlite3.connect(_readonly_uri(config[0][1]), uri=True)
         conn.row_factory = sqlite3.Row
+        conn.create_function("schedule_matches", 5, _schedule_matches, deterministic=True)
         conn.execute("PRAGMA query_only = ON")
         for alias, path, _ in config[1:]:
             conn.execute(f"ATTACH DATABASE ? AS {alias}", (_readonly_uri(path),))
@@ -818,41 +825,121 @@ TERM_LIST_SELECTS = {
 # ---- filters ------------------------------------------------------------------
 
 
-def _period_option_sort_key(bounds: tuple[int, int]) -> tuple[bool, int, int]:
-    """Two-period ranges such as 1-2 and 3-4 come first; every other range follows by start and end."""
-    start, end = bounds
-    return (end - start != 1, start, end)
+@lru_cache(maxsize=4096)
+def _parse_schedule_slots(schedule: str) -> tuple[tuple[str, int], ...]:
+    """Parse "周X N~M节" occurrences into (weekday, period_bitmask) tuples."""
+    if not schedule:
+        return ()
+    slots = []
+    for day, start_s, end_s in SCHEDULE_SLOT_RE.findall(schedule):
+        start, end = int(start_s), int(end_s)
+        if 1 <= start <= end <= 14:
+            mask = ((1 << (end - start + 1)) - 1) << start
+            slots.append((day, mask))
+    return tuple(slots)
+
+
+def _schedule_matches(
+    schedule: str | None,
+    weekdays_col: str | None,
+    weekdays_csv: str,
+    periods_mask: int,
+    mode: str,
+) -> int:
+    """Evaluate schedule overlap or containment ("within") against selected weekdays and periods."""
+    days = frozenset(weekdays_csv.split(",")) if weekdays_csv else None
+    slots = _parse_schedule_slots(schedule or "")
+    if not slots:
+        if periods_mask != 0:
+            return 0
+        if days is None:
+            return 1
+        row_days = re.findall(r"周[一二三四五六日]", weekdays_col or "")
+        if not row_days:
+            return 0
+        if mode == "within":
+            return 1 if all(day in days for day in row_days) else 0
+        return 1 if any(day in days for day in row_days) else 0
+
+    if mode == "within":
+        return 1 if all(
+            (days is None or day in days)
+            and (periods_mask == 0 or (slot_mask & ~periods_mask) == 0)
+            for day, slot_mask in slots
+        ) else 0
+
+    return 1 if any(
+        (days is None or day in days)
+        and (periods_mask == 0 or (slot_mask & periods_mask) != 0)
+        for day, slot_mask in slots
+    ) else 0
 
 
 def _period_options(schedules) -> list[str]:
-    """Distinct class-period ranges ("N-M") found in schedule text.
+    """Distinct single class periods ("1".."12") covered by the term's schedule text.
 
-    Two-period ranges (1-2, 3-4, 10-11 ...) are listed first because they cover most classes;
-    the remaining ranges follow. Both groups are sorted by start then end. Options come from the
-    same "周X N~M节" shape the `period` filter matches, so every option returned here selects at
-    least one course of the same term.
+    Standard PKU periods 1-12 are exposed in ascending order when present so selecting period N
+    returns every course in session during period N; if a dataset only contains 13-14, those
+    periods are returned instead so every offered option matches at least one course.
     """
-    ranges = set()
+    covered: set[int] = set()
     for schedule in schedules:
         for start, end in SCHEDULE_PERIOD_RE.findall(schedule or ""):
             start, end = int(start), int(end)
             if 1 <= start <= end <= 14:
-                ranges.add((start, end))
-    return [f"{start}-{end}" for start, end in sorted(ranges, key=_period_option_sort_key)]
+                covered.update(range(start, end + 1))
+    standard = [period for period in sorted(covered) if 1 <= period <= 12]
+    chosen = standard if standard else sorted(covered)
+    return [str(period) for period in chosen]
 
 
-def _period_bounds(period: object) -> tuple[int, int] | None:
-    """Validate a `period` filter such as "10-11"; return (start, end), or None when empty."""
+def _parse_weekdays(weekday: object) -> tuple[str, ...]:
+    """Validate single or comma-separated weekdays ("周一" or "周二,周四"); return canonical tuple."""
+    if not isinstance(weekday, str):
+        raise HTTPException(status_code=422, detail="Invalid course query parameter")
+    if not weekday:
+        return ()
+    parts = weekday.split(",")
+    if len(parts) > len(WEEKDAY_ORDER) or any(part not in VALID_WEEKDAY_SET for part in parts):
+        raise HTTPException(status_code=422, detail="Invalid course query parameter")
+    selected = frozenset(parts)
+    return tuple(day for day in WEEKDAY_ORDER if day in selected)
+
+
+def _parse_periods(period: object) -> tuple[int, ...]:
+    """Validate `period` ("5", "3-4", or "1-2,5,7-8"); return sorted distinct period numbers."""
     if not isinstance(period, str):
         raise HTTPException(status_code=422, detail="Invalid period")
     if not period:
-        return None
-    if not PERIOD_RANGE_RE.match(period):
+        return ()
+    parts = period.split(",")
+    if len(parts) > 14:
         raise HTTPException(status_code=422, detail="Invalid period")
-    start, end = (int(part) for part in period.split("-"))
-    if start > end:
-        raise HTTPException(status_code=422, detail="Invalid period")
-    return start, end
+    selected: set[int] = set()
+    for part in parts:
+        if not PERIOD_TOKEN_RE.match(part):
+            raise HTTPException(status_code=422, detail="Invalid period")
+        if "-" in part:
+            start, end = (int(piece) for piece in part.split("-"))
+            if start > end:
+                raise HTTPException(status_code=422, detail="Invalid period")
+            selected.update(range(start, end + 1))
+        else:
+            selected.add(int(part))
+    return tuple(sorted(selected))
+
+
+def _periods_bitmask(periods: tuple[int, ...]) -> int:
+    mask = 0
+    for period in periods:
+        mask |= 1 << period
+    return mask
+
+
+def _parse_period_mode(period_mode: object) -> str:
+    if not isinstance(period_mode, str) or period_mode not in VALID_PERIOD_MODES:
+        raise HTTPException(status_code=422, detail="Invalid course query parameter")
+    return "within" if period_mode == "within" else "overlap"
 
 
 @lru_cache(maxsize=6)
@@ -1002,18 +1089,26 @@ def _build_source_where(filters: dict[str, object]) -> tuple[str, list[object]]:
     if department:
         conds.append("s.department = ?")
         params.append(department)
-    weekday = str(filters.get("weekday") or "")
-    if weekday:
-        conds.append("s.weekdays LIKE ?")
-        params.append(f"%{weekday}%")
-    period = filters.get("period")
-    if period:
-        start, end = period
-        # Slots read "周三10~11节". Anchoring on the weekday token keeps "1~12节" from matching
-        # "11~12节"; with a weekday filter the same slot has to carry both.
-        weekday_token = weekday if weekday else "周_"
-        conds.append("s.schedule LIKE ?")
-        params.append(f"%{weekday_token}{start}~{end}节%")
+    raw_weekday = filters.get("weekday")
+    if isinstance(raw_weekday, tuple):
+        weekdays_tuple = raw_weekday
+    elif raw_weekday:
+        weekdays_tuple = _parse_weekdays(raw_weekday)
+    else:
+        weekdays_tuple = ()
+
+    raw_period = filters.get("period")
+    if isinstance(raw_period, tuple):
+        periods_tuple = raw_period
+    elif raw_period:
+        periods_tuple = _parse_periods(raw_period)
+    else:
+        periods_tuple = ()
+
+    period_mode = _parse_period_mode(filters.get("period_mode") or "")
+    if weekdays_tuple or periods_tuple:
+        conds.append("schedule_matches(s.schedule, s.weekdays, ?, ?, ?) = 1")
+        params.extend([",".join(weekdays_tuple), _periods_bitmask(periods_tuple), period_mode])
     grading = str(filters.get("grading") or "")
     if grading:
         conds.append("s.grading = ?")
@@ -1291,16 +1386,16 @@ def _validate_list_params(
     credits: str,
     page: int,
     page_size: int,
-) -> float | None:
+) -> tuple[float | None, tuple[str, ...]]:
     try:
         invalid_choice = (
             term not in VALID_TERMS
             or lang not in VALID_LANGS
-            or weekday not in VALID_WEEKDAYS
             or sort not in VALID_SORTS
         )
     except TypeError:
         invalid_choice = True
+    weekdays_tuple = _parse_weekdays(weekday)
     if (
         invalid_choice
         or isinstance(page, bool)
@@ -1314,14 +1409,14 @@ def _validate_list_params(
     if not isinstance(credits, str):
         raise HTTPException(status_code=422, detail="Invalid credits")
     if not credits:
-        return None
+        return None, weekdays_tuple
     try:
         value = float(credits)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail="Invalid credits") from exc
     if not math.isfinite(value):
         raise HTTPException(status_code=422, detail="Invalid credits")
-    return value
+    return value, weekdays_tuple
 
 
 @lru_cache(maxsize=32)
@@ -1340,12 +1435,23 @@ def list_courses(
     category: str = Query("", description="Category filter"),
     credits: str = Query("", description="Credits filter"),
     department: str = Query("", description="Department filter"),
-    weekday: str = Query("", description="Weekday filter", pattern=r"^(?:|周[一二三四五六日])$"),
+    weekday: str = Query(
+        "",
+        description="Weekday filter: single or comma-separated weekdays such as 周一 or 周二,周四",
+        pattern=r"^(?:|周[一二三四五六日](?:,周[一二三四五六日]){0,6})$",
+    ),
     period: str = Query(
         "",
-        description="Class-period filter such as 3-4 (a session occupying periods 3 through 4); with weekday, the same session must match both",
-        pattern=r"^(?:|(?:[1-9]|1[0-4])-(?:[1-9]|1[0-4]))$",
+        description="Class-period filter: single period (5), range (3-4), or comma-separated list (1-2,5,7-8)",
+        pattern=r"^(?:|(?:[1-9]|1[0-4])(?:-(?:[1-9]|1[0-4]))?(?:,(?:[1-9]|1[0-4])(?:-(?:[1-9]|1[0-4]))?){0,13})$",
     ),
+    period_mode: Annotated[
+        str,
+        Query(
+            description="Schedule matching mode: overlap (in session during selected time) | within (all sessions fall within selected time)",
+            pattern=r"^(?:|overlap|within)$",
+        ),
+    ] = "",
     grading: str = Query("", description="Grading filter"),
     classroom: str = Query("", description="Classroom filter (LIKE, classroom column only)"),
     sort: str = Query(
@@ -1360,12 +1466,13 @@ def list_courses(
     page_size: int = Query(50, ge=1, le=200),
     response: Response = None,
 ):
-    credits_value = _validate_list_params(term, lang, weekday, sort, credits, page, page_size)
+    credits_value, weekdays_tuple = _validate_list_params(term, lang, weekday, sort, credits, page, page_size)
     if any(not _valid_text(value) for value in (q, type, category, department, grading, classroom)):
         raise HTTPException(status_code=422, detail="Invalid course query parameter")
     # Translation is disabled site-wide; accept old lang links but use source fields.
     lang = "zh"
-    period_bounds = _period_bounds(period)
+    periods_tuple = _parse_periods(period)
+    normalized_period_mode = _parse_period_mode(period_mode)
 
     filters = {
         "q": q,
@@ -1373,8 +1480,9 @@ def list_courses(
         "category": category,
         "credits": credits_value,
         "department": department,
-        "weekday": weekday,
-        "period": period_bounds,
+        "weekday": weekdays_tuple,
+        "period": periods_tuple,
+        "period_mode": normalized_period_mode,
         "grading": grading,
         "classroom": classroom,
     }
