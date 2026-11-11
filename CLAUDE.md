@@ -134,27 +134,34 @@ git diff --check
 
 课程列表 `_course_page_rows` 与评测搜索 `_review_page` 各使用 `lru_cache(maxsize=32)`。筛选选项 `_filter_options` 使用 `lru_cache(maxsize=6)`，缓存不可变元组并在每次响应中重新组装列表；沿用 `public, max-age=3600` 的浏览器缓存。键包含查询参数、页码及源数据库版本；`_database_revision` 检查主文件与 WAL 的路径、设备、inode、大小及纳秒修改时间和变更时间，原子替换或库内写入均使缓存失效。缓存不保存数据库连接，课程行重新组装响应，评测结果深拷贝，避免请求间共享可变对象。课程补充状态在每次请求中另查留言库并返回 `no-store`，不缓存账号、收藏或课表响应。SQLite URI 由 `Path.as_uri()` 编码，含特殊字符的合法路径仍保持只读。
 
-`get_messages_db()` 打开可写的留言板数据库：路径来自环境变量 `PINHAOKE_MESSAGES_DB`，本地开发默认仓库根目录 `留言板.db`（已被 `.gitignore` 排除，不进入仓库），生产由 systemd `StateDirectory` 提供 `/var/lib/pinhaoke/留言板.db`。连接启用 WAL 与 `busy_timeout`。三个可写库共用 `_initialize_wal()`；首次从非 WAL 模式切换时，先读完模式查询，再用同目录的空文件 `<库名>.init.lock` 和 `flock` 协调线程及多个 worker；等待文件锁时不持有 SQLite 读锁。锁文件保留，关闭描述符自动解锁，已是 WAL 的库不获取文件锁。schema 迁移仍使用 `BEGIN IMMEDIATE` 和锁内版本复查，保留全部旧记录；首次使用时自建 `messages` 表并迁移到版本 1，增加昵称与回复关系（详见留言板 API 契约）；六个正式库保持只读，`GET /api/health` 不检查留言库。
+`get_messages_db()` 打开可写的留言板数据库：路径来自环境变量 `PINHAOKE_MESSAGES_DB`，本地开发默认仓库根目录 `留言板.db`（已被 `.gitignore` 排除，不进入仓库），生产由 systemd `StateDirectory` 提供 `/var/lib/pinhaoke/留言板.db`。连接启用 WAL 与 `busy_timeout`。三个可写库共用 `_initialize_wal()`；首次从非 WAL 模式切换时，先读完模式查询，再用同目录的空文件 `<库名>.init.lock` 和 `flock` 协调线程及多个 worker；等待文件锁时不持有 SQLite 读锁。锁文件保留，关闭描述符自动解锁，已是 WAL 的库不获取文件锁。schema 迁移仍使用 `BEGIN IMMEDIATE` 和锁内版本复查，保留全部旧记录；首次使用时自建 `messages` 表并依次迁移到版本 1（昵称与回复关系）和版本 2（课程讨论键 `course_key`，详见留言板与课程留言契约）；已处于版本 2 的连接跳过重复 DDL。六个正式库保持只读，`GET /api/health` 不检查留言库。
 
-`get_stats_db()` 以同样方式打开可写的访问统计数据库：路径来自 `PINHAOKE_STATS_DB`，本地默认仓库根目录 `访问统计.db`（已 `.gitignore`），生产为 `/var/lib/pinhaoke/访问统计.db`，首次使用时自建 `visit_days(day, ip_hash, views, last_at)` 表。`record_visit()` 在 `/` 和 `/reviews` 页面路由中记录访问，按北京时间分日、以 IP 哈希对当日访客去重、`views` 累加，并过滤明显的 bot User-Agent；任何异常都被吞掉，绝不影响页面返回。`GET /api/health` 不检查统计库。
+`get_stats_db()` 以同样方式打开可写的访问统计数据库：路径来自 `PINHAOKE_STATS_DB`，本地默认仓库根目录 `访问统计.db`（已 `.gitignore`），生产为 `/var/lib/pinhaoke/访问统计.db`，首次使用时自建 `visit_days(day, ip_hash, views, last_at)` 表。`record_visit()` 在 `/` 和 `/reviews` 页面路由（仅 `GET`，`HEAD` 探活不计入）中记录访问，按北京时间分日、以 IP 哈希对当日访客去重、`views` 累加，并过滤明显的 bot User-Agent；任何异常都被吞掉，绝不影响页面返回。`GET /api/health` 不检查统计库。
 
-`get_accounts_db()` 打开可写的账户数据库：路径来自 `PINHAOKE_ACCOUNTS_DB`，本地默认仓库根目录 `账户.db`（已 `.gitignore`），生产为 `/var/lib/pinhaoke/账户.db`。连接启用 WAL、`busy_timeout` 与 `PRAGMA foreign_keys = ON`，由 `_migrate_accounts_db()` 按 `PRAGMA user_version` 迁移：版本 1 建 `users`、`security_questions`、`sessions`、`favorites`、`auth_events` 五张表；版本 2 增建 `collections` 与 `favorite_collections`，并为已有收藏回填默认收藏夹与成员映射，回填在显式 `BEGIN IMMEDIATE` 事务内锁后重查版本以对齐 `--workers 2` 首连竞争；版本 3 给 `users` 增列 `last_collection_id` 以兼容已有开发版结构（当前发布不改变收藏落点），同样在显式 `BEGIN IMMEDIATE` 事务内锁后重查版本恰执行一次，只加列不回填；版本 4 增加 `nickname`，为新旧用户提供默认昵称“路过的 PKUer”，同样通过锁内版本复查保证只迁移一次。`collections` 以 `UNIQUE(user_id, name)` 和 `is_default = 1` 的唯一部分索引约束每账号恰一个默认夹；`favorite_collections` 复合外键指向 `favorites(user_id, fav_key)`，删收藏行级联清成员映射，删收藏夹级联清该夹映射且不动 `favorites`。删除用户时经两条 `ON DELETE CASCADE` 一并清除密保、会话、收藏、收藏夹与成员映射。默认收藏夹不可删除（409）但可改名，删除自定义收藏夹后清理不再属于任何夹的孤儿收藏行。收藏夹上限 `COLLECTIONS_MAX = 50`（不含默认夹），夹名 `strip()` 后 1 到 `COLLECTION_NAME_MAX = 30` 字，默认夹名为 `DEFAULT_COLLECTION_NAME`。密码与密保答案用标准库 `hashlib.scrypt` 加盐哈希，参数 `SCRYPT_PARAMS` 为 n=2^14、r=8、p=1，序列化为 `scrypt$n$r$p$salt$hash` 并随记录保存，登录成功时低于当前参数的哈希会重算；所有 scrypt 调用经过 `_SCRYPT_GATE`，每个进程最多两个并发。会话令牌由 `secrets.token_urlsafe(32)` 生成，库内只存 SHA-256；cookie `pinhaoke_session` 为 HttpOnly、SameSite=Lax、Path=/，只在 `X-Forwarded-Proto` 或请求 scheme 为 https 时带 Secure，有效期 180 天，`GET /api/account` 每天最多顺延一次。`auth_events(kind, subject, at)` 只保存 IP 哈希、`username_key` 或 `*` 作为限流主体，两天后清除。`GET /api/health` 不检查账户库。
+`get_accounts_db()` 打开可写的账户数据库：路径来自 `PINHAOKE_ACCOUNTS_DB`，本地默认仓库根目录 `账户.db`（已 `.gitignore`），生产为 `/var/lib/pinhaoke/账户.db`。连接启用 WAL、`busy_timeout` 与 `PRAGMA foreign_keys = ON`，由 `_migrate_accounts_db()` 按 `PRAGMA user_version` 迁移：版本 1 建 `users`、`security_questions`、`sessions`、`favorites`、`auth_events` 五张表；版本 2 增建 `collections` 与 `favorite_collections`，并为已有收藏回填默认收藏夹与成员映射，回填在显式 `BEGIN IMMEDIATE` 事务内锁后重查版本以对齐 `--workers 2` 首连竞争；版本 3 给 `users` 增列 `last_collection_id` 以兼容已有开发版结构（当前发布不改变收藏落点），同样在显式 `BEGIN IMMEDIATE` 事务内锁后重查版本恰执行一次，只加列不回填；版本 4 增加 `nickname`，为新旧用户提供默认昵称“路过的 PKUer”，同样通过锁内版本复查保证只迁移一次；版本 5 增建 `timetable_courses(user_id, course_key, snapshot, added_at)`；版本 6 给 `timetable_courses` 增列 `customization` 与 `is_custom` 以支持私有课表编辑和自定义课程。`collections` 以 `UNIQUE(user_id, name)` 和 `is_default = 1` 的唯一部分索引约束每账号恰一个默认夹；`favorite_collections` 复合外键指向 `favorites(user_id, fav_key)`，删收藏行级联清成员映射，删收藏夹级联清该夹映射且不动 `favorites`。删除用户时经 `ON DELETE CASCADE` 一并清除密保、会话、收藏、收藏夹、成员映射与课表课程。默认收藏夹不可删除（409）但可改名，删除自定义收藏夹后清理不再属于任何夹的孤儿收藏行。收藏夹上限 `COLLECTIONS_MAX = 50`（不含默认夹），夹名 `strip()` 后 1 到 `COLLECTION_NAME_MAX = 30` 字，默认夹名为 `DEFAULT_COLLECTION_NAME`。密码与密保答案用标准库 `hashlib.scrypt` 加盐哈希，参数 `SCRYPT_PARAMS` 为 n=2^14、r=8、p=1，序列化为 `scrypt$n$r$p$salt$hash` 并随记录保存，登录成功时低于当前参数的哈希会重算；所有 scrypt 调用经过 `_SCRYPT_GATE`，每个进程最多两个并发。会话令牌由 `secrets.token_urlsafe(32)` 生成，库内只存 SHA-256；cookie `pinhaoke_session` 为 HttpOnly、SameSite=Lax、Path=/，只在 `X-Forwarded-Proto` 或请求 scheme 为 https 时带 Secure，有效期 180 天，`GET /api/account` 每天最多顺延一次。`auth_events(kind, subject, at)` 只保存 IP 哈希、`username_key` 或 `*` 作为限流主体，两天后清除。`GET /api/health` 不检查账户库。
 
 ## API 契约
 
 | Endpoint | 契约 |
 |---|---|
+| `GET/HEAD /`、`GET/HEAD /reviews` | 返回课程页与评测页（`Cache-Control: no-cache`）；仅 `GET` 记录访问统计，`HEAD` 探活不累加。 |
 | `GET /api/filters` | 参数 `term=fall\|spring\|summer`，默认 `fall`。返回 `course_types`、`categories`、`departments`、`credits`、`gradings`、`weekdays`、`periods`。`periods` 是从当前学期 `schedule` 文本提取的全部 `N-M` 节次区间，两节课的区间（如 `1-2`、`3-4`、`10-11`）排在最前，其余区间随后，两组内部都按起止节次排序，每个候选项至少命中一门课。 |
 | `GET /api/courses` | 返回 `{total, page, page_size, courses}`。支持搜索、筛选、排序、语言和分页。 |
 | `GET /api/courses/{id}` | 前缀已包含学期与学段，不接受 `term`；支持 `lang`。 |
+| `GET /api/courses/{course_id}/messages` | 返回 `{messages, total, has_more}`，使用 `before_id` 游标倒序分页当前课程的公开补充。 |
+| `POST /api/courses/{course_id}/messages` | 发布一条课程补充，body 为 `{content}`；成功返回 201。 |
 | `GET /api/reviews` | 返回 `{total, page, page_size, query, threads}`。无搜索词时先置顶 2026 年质量分最高的 `10` 个树洞，其余按时间倒序；有搜索词时全部按时间倒序。 |
 | `GET /api/reviews/{pid}` | 返回一个已命中评测主题的完整主帖与快照内全部回复；只在用户打开卡片时请求。 |
 | `GET /api/review-courses` | 返回按热度排序且可按 `q` 过滤的课程名、课程号、主题数和条目数；评测页用它填充“热门课程”菜单。 |
 | `GET /api/reviews/meta` | 返回保留条目的起止日期、树洞快照日期、源数量、命中数量和缓存回复覆盖率。 |
 | `GET /api/messages` | 返回 `{total, page, page_size, messages}`，公开留言按发布时间倒序分页。 |
 | `POST /api/messages` | 发布一条公开留言，body 为 `{content}`；成功返回 201 和新留言。 |
+| `GET /api/messages/{message_id}/replies` | 返回 `{replies, has_more}`，使用 `before_id` 游标倒序读取指定根留言的回复。 |
+| `POST /api/messages/{message_id}/replies` | 回复一条公开留言或课程补充，body 为 `{content}`；成功返回 201。 |
+| `GET /api/changelog` | 返回 `changelog.json` 中的中文主要更新记录，`no-store`。 |
 | `GET /api/stats` | 返回今日/近 7 天/累计的访问量与访客数及近 7 天每日趋势；`no-store`。 |
-| `GET /api/account` | 返回 `{authenticated}`；已登录时另含 `username`、`questions`（只含 `position` 与 `question`）、`favorites`、`limit`、`collections` 与 `collections_limit`，每条收藏含 `collection_ids`。 |
+| `GET /api/account` | 返回 `{authenticated}`；已登录时另含 `username`、`nickname`、`questions`（只含 `position` 与 `question`）、`favorites`、`limit`、`collections` 与 `collections_limit`，每条收藏含 `collection_ids`。 |
+| `POST /api/account/nickname` | body `{nickname}`；更新登录账号昵称（1 到 `NICKNAME_MAX_LENGTH` 字），返回 `{nickname}`。 |
 | `POST /api/auth/register` | body `{username, password, questions}`；成功 201 返回 `{username}` 并签发会话 cookie，用户名已占用 409。 |
 | `POST /api/auth/login` | body `{username, password}`；成功 200 返回 `{username}` 并签发新会话，失败统一 401。 |
 | `POST /api/auth/logout` | 删除当前会话并清除 cookie，204，幂等。 |
@@ -162,7 +169,7 @@ git diff --check
 | `POST /api/auth/questions` | body `{current_password, questions}`；204，整体替换密保问题。 |
 | `POST /api/auth/reset/questions` | body `{username}`；返回 `{questions}`，用户名不存在 404。 |
 | `POST /api/auth/reset` | body `{username, position, answer, new_password}`；答对任意一个问题即 204 并吊销该用户全部会话，答错 401。 |
-| `POST /api/auth/delete` | body `{password}`；204，级联删除密保、会话与收藏并清除 cookie。 |
+| `POST /api/auth/delete` | body `{password}`；204，级联删除密保、会话、收藏与课表课程并清除 cookie。 |
 | `GET /api/favorites` | 返回 `{favorites, limit, collections, collections_limit}`，每条收藏含 `collection_ids`，需登录。 |
 | `POST /api/favorites` | body `{id}`；服务器从课程库生成快照并映射进默认收藏夹，新增 201、已存在 200，都返回全量 `{favorites, limit, collections, collections_limit}`，课程不存在 404，超过上限 409。 |
 | `POST /api/favorites/remove` | body `{fav_key}`；200 返回全量收藏与收藏夹 payload，删收藏行并级联清成员映射，幂等。 |
@@ -170,6 +177,8 @@ git diff --check
 | `POST /api/collections` | body `{name}`；新建自定义收藏夹，201 返回全量 payload，撞名或超过 `COLLECTIONS_MAX` 409，名称非法 422。 |
 | `POST /api/collections/rename` | body `{collection_id, name}`；默认夹与自定义夹都可改名，200 返回全量 payload，撞名 409，不存在 404，名称非法 422。 |
 | `POST /api/collections/remove` | body `{collection_id}`；删自定义收藏夹并取消仅属于该夹的收藏，默认夹 409，不存在 404，200 返回全量 payload。 |
+| `GET /api/timetable` | 返回 `{courses, limit}`，读取当前登录用户的私有课表快照与自定义课程。 |
+| `POST /api/timetable`、`POST /api/timetable/remove`、`POST /api/timetable/custom`、`POST /api/timetable/update`、`POST /api/timetable/reset` | 增删课表课程、创建自定义课程、保存私有编辑或恢复选课网原始字段，均返回 `{courses, limit}`（`no-store`）。 |
 | `GET /api/health` | 返回五个课程库及一个评测库的健康状态；异常时为 503。 |
 
 `GET /api/courses` 参数：

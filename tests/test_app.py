@@ -402,6 +402,16 @@ class VisitStatsApiTests(unittest.TestCase):
         except Exception as exc:  # noqa: BLE001 - 明确断言不抛出
             self.fail(f"record_visit raised: {exc!r}")
 
+    def test_head_requests_are_supported_on_page_routes_without_counting_visits(self):
+        for path in ("/", "/reviews"):
+            route = next((r for r in app.app.routes if getattr(r, "path", None) == path), None)
+            self.assertIsNotNone(route, path)
+            self.assertTrue({"GET", "HEAD"}.issubset(route.methods), path)
+        head_req = Mock(method="HEAD", headers={"x-real-ip": "1.2.3.4", "user-agent": "Mozilla/5.0"}, client=None)
+        app.root(head_req)
+        app.reviews_page(head_req)
+        self.assertEqual(self.stats()["today"], {"views": 0, "visitors": 0})
+
 
 def _session_cookie(response):
     header = response.headers.get("set-cookie", "")
@@ -1314,7 +1324,10 @@ class FavoritesApiTests(unittest.TestCase):
 
     def test_refresh_rewrites_drifted_ids_after_rebuild(self):
         self.add("a1")
-        rebuilt = [dict(FIXTURE_COURSES[0], id=7), dict(FIXTURE_COURSES[1], id=8)]
+        rebuilt = [
+            dict(FIXTURE_COURSES[0], id=7, teacher=" 张三(教授) "),
+            dict(FIXTURE_COURSES[1], id=8),
+        ]
         _build_course_db(self.course_db, rebuilt)
         items = self.favorites()
         self.assertEqual(items[0]["id"], "a7")

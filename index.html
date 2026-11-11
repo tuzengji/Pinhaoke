@@ -743,9 +743,8 @@ html[data-theme="dark"] .filters::before {
   background: radial-gradient(120% 100% at 0% 0%, rgba(70, 214, 184, 0.06), transparent 60%);
 }
 
-.filter-grid { position: relative; }
-
 .filter-grid {
+  position: relative;
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 18px 16px;
@@ -4324,7 +4323,7 @@ function trapModalFocus(event) {
   const courseModal = document.getElementById('modalOverlay');
   const focusable = [...courseModal.querySelectorAll(
     'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-  )].filter(element => !element.disabled && element.getAttribute('aria-hidden') !== 'true');
+  )].filter(element => !element.disabled && !element.hidden && element.getAttribute('aria-hidden') !== 'true' && element.offsetParent !== null);
   if (!focusable.length) {
     event.preventDefault();
     document.getElementById('modalContent').focus();
@@ -4536,22 +4535,24 @@ function closeModal({ viaPopstate = false } = {}) {
   detailController = null;
   overlay.classList.remove('open');
   if (modalStackedOnAccount) {
-    // 叠在个人中心之上的详情：关闭后回到个人中心，不解除背景 inert、不改 URL。
+    // 叠在个人中心之上的详情：若个人中心仍打开则回到个人中心；若已因会话失效等原因关闭则继续解除页面锁定。
     overlay.classList.remove('modal-over-account');
     modalStackedOnAccount = false;
     const view = document.getElementById('accountView');
     if (view) view.inert = false;
-    document.body.style.overflow = 'hidden';
-    currentModalCourseId = null;
     const owned = courseModalHistoryPushed;
     courseModalHistoryPushed = false;
     if (!viaPopstate && owned) { try { history.back(); } catch (e) {} }
-    const backTarget = modalReturnFocus;
-    modalReturnFocus = null;
-    const courseTarget = Array.from(view?.querySelectorAll('[data-saved-course-id]') || []).find(element => element.dataset.savedCourseId === backTarget?.dataset.savedCourseId);
-    const focusTarget = backTarget?.isConnected ? backTarget : (courseTarget || view?.querySelector('.account-section-button[aria-pressed="true"]') || document.getElementById('accountBack'));
-    if (focusTarget) requestAnimationFrame(() => focusTarget.focus({ preventScroll: true }));
-    return;
+    if (accountViewOpen) {
+      document.body.style.overflow = 'hidden';
+      currentModalCourseId = null;
+      const backTarget = modalReturnFocus;
+      modalReturnFocus = null;
+      const courseTarget = Array.from(view?.querySelectorAll('[data-saved-course-id]') || []).find(element => element.dataset.savedCourseId === backTarget?.dataset.savedCourseId);
+      const focusTarget = backTarget?.isConnected ? backTarget : (courseTarget || view?.querySelector('.account-section-button[aria-pressed="true"]') || document.getElementById('accountBack'));
+      if (focusTarget) requestAnimationFrame(() => focusTarget.focus({ preventScroll: true }));
+      return;
+    }
   }
   document.body.style.overflow = '';
   setModalBackgroundInert(false);
@@ -5979,9 +5980,15 @@ function renderFavAccount(body) {
     button.disabled = true;
     const res = await favApi('POST', '/api/auth/logout');
     if (res.ok || res.status === 401) {
+      const fromAccountView = accountViewOpen;
       setFavUser(null);
-      setFavStatus('已退出登录');
-      requestAnimationFrame(() => document.querySelector('#favOverlay .modal-close').focus());
+      if (fromAccountView) {
+        favToast('已退出登录');
+        requestAnimationFrame(() => document.getElementById('favBtn')?.focus());
+      } else {
+        setFavStatus('已退出登录');
+        requestAnimationFrame(() => document.querySelector('#favOverlay .modal-close')?.focus());
+      }
     } else {
       button.disabled = false;
       setFavStatus(favErrorText(res), true);
@@ -7066,9 +7073,15 @@ function buildDeleteForm(done) {
       setFavStatus(favErrorText(res, { 401: '密码错误' }), true);
       return;
     }
+    const fromAccountView = accountViewOpen;
     setFavUser(null);
-    setFavStatus('账号已删除');
-    requestAnimationFrame(() => document.querySelector('#favOverlay .modal-close').focus());
+    if (fromAccountView) {
+      favToast('账号已删除');
+      requestAnimationFrame(() => document.getElementById('favBtn')?.focus());
+    } else {
+      setFavStatus('账号已删除');
+      requestAnimationFrame(() => document.querySelector('#favOverlay .modal-close')?.focus());
+    }
   });
   return form;
 }

@@ -58,6 +58,7 @@ TASKS = (
     ("summer", "intro", DATABASES["summer"], "intro_cn", "intro_cn", "Summer intro"),
     ("summer", "syllabus", DATABASES["summer"], "syllabus", "syllabus", "Summer syllabus"),
     ("summer", "evaluation", DATABASES["summer"], "evaluation", "evaluation", "Summer evaluation"),
+    ("summer", "reference_book", DATABASES["summer"], "reference_book", "reference_book", "Summer reference_book"),
     ("fall", "intro", DATABASES["fall"], "intro_cn", "intro_cn", "Fall intro"),
     ("fall", "syllabus", DATABASES["fall"], "syllabus", "syllabus", "Fall syllabus"),
     ("fall", "evaluation", DATABASES["fall"], "evaluation", "evaluation", "Fall evaluation"),
@@ -124,15 +125,15 @@ def gather_missing(db_path, src_field, store_field):
             f"SELECT course_id, {src_field} FROM detail_info "
             f"WHERE {src_field} IS NOT NULL AND TRIM({src_field}) != ''"
         ).fetchall()
+        existing_by_cid = {}
+        for cid, lang in conn.execute(
+            "SELECT course_id, lang FROM translations WHERE field=?",
+            (store_field,),
+        ):
+            existing_by_cid.setdefault(cid, set()).add(lang)
         missing = []
         for cid, source in rows:
-            existing = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT lang FROM translations WHERE course_id=? AND field=?",
-                    (cid, store_field),
-                )
-            }
+            existing = existing_by_cid.get(cid, ())
             needed = [lang for lang in LANGS if lang not in existing]
             if needed:
                 missing.append((cid, source, needed))
@@ -223,7 +224,10 @@ def main(argv=None):
     print("== per-lang retranslate ==")
     total_ok = 0
     total_failed = 0
+    remaining = args.limit if args.limit else None
     for _db_key, _field_key, db_path, src_field, store_field, label in selected:
+        if remaining is not None and remaining <= 0:
+            break
         try:
             ok, failed = process(
                 db_path,
@@ -231,13 +235,15 @@ def main(argv=None):
                 store_field,
                 label,
                 workers=args.workers,
-                limit=args.limit,
+                limit=remaining or 0,
             )
         except Exception as exc:
             ok, failed = 0, 1
             print(f"[{label}] task failed: {type(exc).__name__}: {exc}")
         total_ok += ok
         total_failed += failed
+        if remaining is not None:
+            remaining -= ok + failed
     print(f"\nTOTAL: OK={total_ok} FAIL={total_failed}")
     return 1 if total_failed else 0
 

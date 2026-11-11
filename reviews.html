@@ -40,6 +40,7 @@ a { color: inherit; }
 :root {
   --bg: #F7F7F8;
   --surface: #FFFFFF;
+  --surface-2: #F1F2F4;
   --surface-muted: #F1F2F4;
   --ink: #101217;
   --ink-2: #3F444D;
@@ -64,6 +65,7 @@ a { color: inherit; }
 html[data-theme="dark"] {
   --bg: #0E1013;
   --surface: #16181D;
+  --surface-2: #1D2026;
   --surface-muted: #1D2026;
   --ink: #F0F1F4;
   --ink-2: #C3C7CE;
@@ -1141,10 +1143,10 @@ function trapThreadModalFocus(event) {
   }
   const first = focusable[0];
   const last = focusable[focusable.length - 1];
-  if (event.shiftKey && document.activeElement === first) {
+  if (event.shiftKey && (document.activeElement === first || !threadModalOverlay.contains(document.activeElement))) {
     event.preventDefault();
     last.focus();
-  } else if (!event.shiftKey && document.activeElement === last) {
+  } else if (!event.shiftKey && (document.activeElement === last || !threadModalOverlay.contains(document.activeElement))) {
     event.preventDefault();
     first.focus();
   }

@@ -1745,6 +1745,7 @@ class FrontendContractTests(unittest.TestCase):
         closem = function_body("closeModal")
         self.assertIn("view.inert = false", closem)
         self.assertIn("modalStackedOnAccount = false", closem)
+        self.assertIn("if (accountViewOpen) {", closem)
         # 叠层详情的 Escape 与焦点优先于个人视图
         self.assertLess(
             keydown_new.index("modalStackedOnAccount"),

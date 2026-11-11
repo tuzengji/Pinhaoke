@@ -12,10 +12,10 @@ Fields covered:
     UG basic_info  : course_name, notes, pnp, classroom, major
     UG detail_info : prerequisites, ge_series, textbook
     GR basic_info  : course_name, notes, classroom, major
-    GR detail_info : audience, term, reference_book(short)
+    GR detail_info : audience, term
   Long (Phase B):
-    UG detail_info : syllabus, evaluation
-    GR detail_info : reference_book(long), extra_notes (already done)
+    UG detail_info : syllabus, evaluation, reference_book
+    GR detail_info : reference_book, syllabus (fall GR)
 
 Already done elsewhere:
   intro_cn (UG), intro (GR), extra_notes (GR) — handled by translate_courses.py

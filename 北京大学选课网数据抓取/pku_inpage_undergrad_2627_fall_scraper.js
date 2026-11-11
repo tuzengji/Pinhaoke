@@ -257,10 +257,6 @@
   }
 
   function pageUrl(pageValue) {
-    if (/^\d+$/.test(pageValue)) {
-      const params = new URLSearchParams({ netui_row: pageValue });
-      return `${PAGER_PATH}?${params.toString()}`;
-    }
     const params = new URLSearchParams({ netui_row: pageValue });
     return `${PAGER_PATH}?${params.toString()}`;
   }

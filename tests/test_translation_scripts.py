@@ -514,6 +514,7 @@ class StubbornMatrixTests(unittest.TestCase):
             ("summer", "intro", "intro_cn", "intro_cn", "Summer intro"),
             ("summer", "syllabus", "syllabus", "syllabus", "Summer syllabus"),
             ("summer", "evaluation", "evaluation", "evaluation", "Summer evaluation"),
+            ("summer", "reference_book", "reference_book", "reference_book", "Summer reference_book"),
             ("fall", "intro", "intro_cn", "intro_cn", "Fall intro"),
             ("fall", "syllabus", "syllabus", "syllabus", "Fall syllabus"),
             ("fall", "evaluation", "evaluation", "evaluation", "Fall evaluation"),
@@ -524,6 +525,17 @@ class StubbornMatrixTests(unittest.TestCase):
             ("fall_gr", "reference_book", "reference_book", "reference_book", "Fall GR reference_book"),
         }
         self.assertTrue(required.issubset(actual), required - actual)
+
+    def test_stubborn_limit_acts_as_global_budget_across_tasks(self):
+        module = import_script("translate_stubborn")
+        with patch.object(module, "setup_db"), patch.object(
+            module, "process", side_effect=[(2, 1), (5, 0)]
+        ) as process:
+            with contextlib.redirect_stdout(io.StringIO()):
+                status = module.main(["--db", "summer", "--limit", "3"])
+        self.assertEqual(status, 1)
+        self.assertEqual(process.call_count, 1)
+        self.assertEqual(process.call_args.kwargs["limit"], 3)
 
 
 if __name__ == "__main__":

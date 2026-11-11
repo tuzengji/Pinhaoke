@@ -24,7 +24,6 @@ NOT need to pass ?term= when fetching a specific course.
 import base64
 import fcntl
 from contextlib import contextmanager
-from copy import deepcopy
 from functools import lru_cache
 import hashlib
 import hmac
@@ -239,18 +238,20 @@ def get_messages_db():
         conn.execute("PRAGMA busy_timeout = 5000")
         _initialize_wal(conn, MESSAGES_DB_PATH)
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS messages ("
-            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-            " posted_at INTEGER NOT NULL,"
-            " content TEXT NOT NULL,"
-            " ip_hash TEXT NOT NULL)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_messages_ip_time"
-            " ON messages(ip_hash, posted_at)"
-        )
-        if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version < 2:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS messages ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " posted_at INTEGER NOT NULL,"
+                " content TEXT NOT NULL,"
+                " ip_hash TEXT NOT NULL)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_ip_time"
+                " ON messages(ip_hash, posted_at)"
+            )
+        if version < 1:
             # 锁内复查，兼容两个 worker 同时首次访问旧留言库。
             conn.execute("BEGIN IMMEDIATE")
             if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
@@ -264,7 +265,8 @@ def get_messages_db():
                 conn.execute("CREATE INDEX idx_messages_parent ON messages(parent_id, id)")
                 conn.execute("PRAGMA user_version = 1")
             conn.commit()
-        if conn.execute("PRAGMA user_version").fetchone()[0] < 2:
+            version = 1
+        if version < 2:
             conn.execute("BEGIN IMMEDIATE")
             if conn.execute("PRAGMA user_version").fetchone()[0] < 2:
                 conn.execute("ALTER TABLE messages ADD COLUMN course_key TEXT NOT NULL DEFAULT ''")
@@ -560,29 +562,33 @@ def check_database_health() -> dict:
                 "FROM entity_aliases GROUP BY entity_type"
             )
         )
-        invalid_review_highlight = False
-        previous_highlight_key = None
-        previous_highlight_end = 0
-        for entry_key, content, start, end in conn.execute(
-            """
-            SELECT h.entry_key, e.content, h.start_offset, h.end_offset
-            FROM entry_highlights h
-            JOIN entries e ON e.entry_key=h.entry_key
-            ORDER BY h.entry_key, h.start_offset, h.end_offset
-            """
-        ):
-            if entry_key != previous_highlight_key:
-                previous_highlight_key = entry_key
-                previous_highlight_end = 0
-            if (
-                start < previous_highlight_end
-                or start < 0
-                or end <= start
-                or end > len(content)
-            ):
-                invalid_review_highlight = True
-                break
-            previous_highlight_end = end
+        invalid_review_highlight = (
+            conn.execute(
+                """
+                SELECT 1
+                FROM (
+                    SELECT
+                        h.start_offset,
+                        h.end_offset,
+                        e.content,
+                        LAG(h.end_offset, 1, 0) OVER (
+                            PARTITION BY h.entry_key
+                            ORDER BY h.start_offset, h.end_offset
+                        ) AS prev_end
+                    FROM entry_highlights h
+                    LEFT JOIN entries e ON e.entry_key = h.entry_key
+                )
+                WHERE content IS NULL
+                   OR INSTR(content, CHAR(0)) > 0
+                   OR start_offset < prev_end
+                   OR start_offset < 0
+                   OR end_offset <= start_offset
+                   OR end_offset > LENGTH(content)
+                LIMIT 1
+                """
+            ).fetchone()
+            is not None
+        )
         review_metadata = dict(conn.execute("SELECT key, value FROM metadata"))
         review_foreign_key_violation = conn.execute(
             "PRAGMA foreign_key_check"
@@ -1704,6 +1710,31 @@ def _review_page(query, page, page_size, revision):
             "query": query, "threads": threads}
 
 
+def _clone_review_page(cached: dict) -> dict:
+    threads = []
+    for thread in cached["threads"]:
+        entries = [
+            {
+                **entry,
+                "highlights": [dict(highlight) for highlight in entry["highlights"]],
+            }
+            for entry in thread["entries"]
+        ]
+        post_highlights = next(
+            (entry["highlights"] for entry in entries if entry["kind"] == "post"),
+            [dict(highlight) for highlight in thread["highlights"]],
+        )
+        threads.append(
+            {
+                **thread,
+                "highlights": list(post_highlights),
+                "courses": list(thread["courses"]),
+                "entries": entries,
+            }
+        )
+    return {**cached, "threads": threads}
+
+
 @app.get("/api/reviews")
 def list_reviews(
     q: str = Query("", max_length=REVIEW_QUERY_MAX_LENGTH),
@@ -1714,7 +1745,7 @@ def list_reviews(
     _validate_review_pagination(page, page_size)
     revision = _database_revision((REVIEWS_DB,))
     # 响应不能共享可变列表，避免调用方污染其他请求的缓存。
-    return deepcopy(_review_page(query, page, page_size, revision))
+    return _clone_review_page(_review_page(query, page, page_size, revision))
 
 
 @app.get("/api/review-courses")
@@ -1877,10 +1908,13 @@ def _is_bot_user_agent(user_agent: str) -> bool:
 
 
 def record_visit(request) -> None:
-    # 记录一次页面访问；任何异常都不能影响页面返回。
+    # 记录一次页面访问；HEAD 探活不计入统计，任何异常都不能影响页面返回。
     if request is None:
         return
     try:
+        method = getattr(request, "method", None)
+        if isinstance(method, str) and method.upper() != "GET":
+            return
         if _is_bot_user_agent(request.headers.get("user-agent", "")):
             return
         now = int(time.time())
@@ -2289,6 +2323,24 @@ def _purge_expired(conn, now: int) -> None:
     conn.execute("DELETE FROM sessions WHERE expires_at < ?", (now,))
 
 
+_last_expired_purge_at = 0
+
+
+def _consume_rate_limit(conn, kind: str, subject: str, now: int) -> None:
+    global _last_expired_purge_at
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        _enforce_rate_limit(conn, kind, subject, now)
+        _record_event(conn, kind, subject, now)
+        if abs(now - _last_expired_purge_at) >= 600:
+            _purge_expired(conn, now)
+            _last_expired_purge_at = now
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def _session_token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -2555,13 +2607,17 @@ def _enrich_saved_courses(items: list) -> None:
             by_identity = {}
             for row in rows:
                 identity = (
-                    row["id"][0], str(row["course_code"]), str(row["class_no"]),
+                    row["id"][0],
+                    str(row["course_code"] or "").strip(),
+                    str(row["class_no"] or "").strip(),
                     (row["teacher"] or "").strip(),
                 )
                 by_identity.setdefault(identity, []).append(row)
             for prefix, item in eligible:
                 identity = (
-                    prefix, str(item["course_code"]), str(item["class_no"]),
+                    prefix,
+                    str(item["course_code"] or "").strip(),
+                    str(item["class_no"] or "").strip(),
                     (item["teacher"] or "").strip(),
                 )
                 candidates = by_identity.get(identity, [])
@@ -2597,38 +2653,55 @@ def _refresh_favorite_ids(conn, user_id: int, items: list) -> None:
             continue
         alias_by_prefix = {prefix: alias for alias, _, prefix in config}
         current_label = _term_label(term)
+        by_alias = {}
+        for item in group:
+            if item["term_label"] != current_label:
+                item["available"] = False
+                continue
+            _, prefix, local_id = _parse_id(item["id"])
+            alias = alias_by_prefix.get(prefix)
+            if alias is None:
+                item["available"] = False
+                continue
+            by_alias.setdefault((prefix, alias), []).append((local_id, item))
+        if not by_alias:
+            continue
         try:
             with get_db(term) as course_conn:
-                for item in group:
-                    if item["term_label"] != current_label:
-                        item["available"] = False
-                        continue
-                    _, prefix, local_id = _parse_id(item["id"])
-                    alias = alias_by_prefix.get(prefix)
-                    if alias is None:
-                        item["available"] = False
-                        continue
-                    exists = course_conn.execute(
-                        f"SELECT 1 FROM {alias}.basic_info WHERE id=?", (local_id,)
-                    ).fetchone()
-                    if exists:
-                        continue
-                    row = course_conn.execute(
-                        f"SELECT MIN(id) FROM {alias}.basic_info"
-                        " WHERE course_code=? AND CAST(class_no AS TEXT)=?"
-                        " AND COALESCE(teacher, '')=?",
-                        (item["course_code"], item["class_no"], item["teacher"]),
-                    ).fetchone()
-                    if row is None or row[0] is None:
-                        item["available"] = False
-                        continue
-                    new_id = f"{prefix}{row[0]}"
-                    conn.execute(
-                        "UPDATE favorites SET course_id=? WHERE user_id=? AND fav_key=?",
-                        (new_id, user_id, item["fav_key"]),
-                    )
-                    item["id"] = new_id
-                    changed = True
+                for (prefix, alias), alias_items in by_alias.items():
+                    local_ids = list(dict.fromkeys(local_id for local_id, _ in alias_items))
+                    placeholders = ",".join("?" for _ in local_ids)
+                    existing_ids = {
+                        row[0]
+                        for row in course_conn.execute(
+                            f"SELECT id FROM {alias}.basic_info WHERE id IN ({placeholders})",
+                            local_ids,
+                        ).fetchall()
+                    }
+                    for local_id, item in alias_items:
+                        if local_id in existing_ids:
+                            continue
+                        row = course_conn.execute(
+                            f"SELECT MIN(id) FROM {alias}.basic_info"
+                            " WHERE TRIM(CAST(course_code AS TEXT))=?"
+                            " AND TRIM(CAST(class_no AS TEXT))=?"
+                            " AND TRIM(COALESCE(teacher, ''))=?",
+                            (
+                                str(item["course_code"] or "").strip(),
+                                str(item["class_no"] or "").strip(),
+                                str(item["teacher"] or "").strip(),
+                            ),
+                        ).fetchone()
+                        if row is None or row[0] is None:
+                            item["available"] = False
+                            continue
+                        new_id = f"{prefix}{row[0]}"
+                        conn.execute(
+                            "UPDATE favorites SET course_id=? WHERE user_id=? AND fav_key=?",
+                            (new_id, user_id, item["fav_key"]),
+                        )
+                        item["id"] = new_id
+                        changed = True
         except (sqlite3.Error, OSError, HTTPException):
             for item in group:
                 item["available"] = False
@@ -2935,9 +3008,7 @@ def add_timetable_course(request: Request, payload: dict = Body(...)):
     with get_accounts_db() as conn:
         session = _require_user(conn, request, now)
         user_id = session['user_id']
-        _enforce_rate_limit(conn, 'favorite_write_ip', _client_ip_hash(request), now)
-        _record_event(conn, 'favorite_write_ip', _client_ip_hash(request), now)
-        conn.commit()
+        _consume_rate_limit(conn, 'favorite_write_ip', _client_ip_hash(request), now)
         snapshot = _favorite_snapshot(course_id)
         snapshot['id'] = snapshot.pop('course_id')
         _enrich_saved_courses([snapshot])
@@ -2945,6 +3016,7 @@ def add_timetable_course(request: Request, payload: dict = Body(...)):
         conn.execute('BEGIN IMMEDIATE')
         exists = conn.execute('SELECT 1 FROM timetable_courses WHERE user_id=? AND course_key=?', (user_id, key)).fetchone()
         if not exists and conn.execute('SELECT COUNT(*) FROM timetable_courses WHERE user_id=?', (user_id,)).fetchone()[0] >= TIMETABLE_LIMIT:
+            conn.rollback()
             raise HTTPException(status_code=409, detail='课表课程已达上限（100 门）')
         conn.execute("INSERT INTO timetable_courses(user_id,course_key,snapshot,added_at) VALUES(?,?,?,?) "
                      "ON CONFLICT(user_id,course_key) DO UPDATE SET snapshot=excluded.snapshot",
@@ -2959,14 +3031,10 @@ def remove_timetable_course(request: Request, payload: dict = Body(...)):
     key = _payload_dict(payload).get('course_key')
     if not _valid_text(key) or not 1 <= len(key) <= 2000:
         raise HTTPException(status_code=422, detail="Invalid course key")
-    with get_accounts_db() as conn:
-        now = int(time.time())
-        session = _require_user(conn, request, now)
-        _enforce_rate_limit(conn, 'favorite_write_ip', _client_ip_hash(request), now)
-        _record_event(conn, 'favorite_write_ip', _client_ip_hash(request), now)
-        conn.execute('DELETE FROM timetable_courses WHERE user_id=? AND course_key=?', (session['user_id'], key))
+    with _timetable_write(request) as (conn, user_id, _):
+        conn.execute('DELETE FROM timetable_courses WHERE user_id=? AND course_key=?', (user_id, key))
         conn.commit()
-        return _no_store(_timetable_payload(conn, session['user_id']))
+        return _no_store(_timetable_payload(conn, user_id))
 
 
 @app.get("/api/account")
@@ -3028,17 +3096,28 @@ def register_account(request: Request, payload: dict = Body(...)):
     now = int(time.time())
     ip_hash = _client_ip_hash(request)
     with get_accounts_db() as conn:
-        _enforce_rate_limit(conn, "register_ip", ip_hash, now)
-        _enforce_rate_limit(conn, "secret_verify_global", "*", now)
-        _record_event(conn, "register_ip", ip_hash, now)
-        conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _enforce_rate_limit(conn, "register_ip", ip_hash, now)
+            _enforce_rate_limit(conn, "secret_verify_global", "*", now)
+            _record_event(conn, "register_ip", ip_hash, now)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         taken = conn.execute(
             "SELECT 1 FROM users WHERE username_key=?", (username_key,)
         ).fetchone()
         if taken:
             raise HTTPException(status_code=409, detail="Username already taken")
-        _record_event(conn, "secret_verify_global", "*", now, count=1 + len(questions))
-        conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _enforce_rate_limit(conn, "secret_verify_global", "*", now)
+            _record_event(conn, "secret_verify_global", "*", now, count=1 + len(questions))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         password_hash = _hash_secret(password)
         hashed_questions = _hash_questions(questions)
         try:
@@ -3175,9 +3254,7 @@ def reset_questions(request: Request, payload: dict = Body(...)):
     now = int(time.time())
     ip_hash = _client_ip_hash(request)
     with get_accounts_db() as conn:
-        _enforce_rate_limit(conn, "reset_lookup_ip", ip_hash, now)
-        _record_event(conn, "reset_lookup_ip", ip_hash, now)
-        conn.commit()
+        _consume_rate_limit(conn, "reset_lookup_ip", ip_hash, now)
         user = conn.execute(
             "SELECT id, username FROM users WHERE username_key=?", (username_key,)
         ).fetchone()
@@ -3287,9 +3364,7 @@ def add_favorite(request: Request, payload: dict = Body(...)):
     ip_hash = _client_ip_hash(request)
     with get_accounts_db() as conn:
         session = _require_user(conn, request, now)
-        _enforce_rate_limit(conn, "favorite_write_ip", ip_hash, now)
-        _record_event(conn, "favorite_write_ip", ip_hash, now)
-        conn.commit()
+        _consume_rate_limit(conn, "favorite_write_ip", ip_hash, now)
         snapshot = _favorite_snapshot(course_id)
         user_id = session["user_id"]
         conn.execute("BEGIN IMMEDIATE")
@@ -3360,9 +3435,7 @@ def set_favorite_collections(request: Request, payload: dict = Body(...)):
     ip_hash = _client_ip_hash(request)
     with get_accounts_db() as conn:
         session = _require_user(conn, request, now)
-        _enforce_rate_limit(conn, "favorite_write_ip", ip_hash, now)
-        _record_event(conn, "favorite_write_ip", ip_hash, now)
-        conn.commit()
+        _consume_rate_limit(conn, "favorite_write_ip", ip_hash, now)
         user_id = session["user_id"]
         conn.execute("BEGIN IMMEDIATE")
         collection_ids = _owned_collection_ids(conn, user_id, data.get("collection_ids"))
@@ -3401,9 +3474,7 @@ def create_collection(request: Request, payload: dict = Body(...)):
     ip_hash = _client_ip_hash(request)
     with get_accounts_db() as conn:
         session = _require_user(conn, request, now)
-        _enforce_rate_limit(conn, "favorite_write_ip", ip_hash, now)
-        _record_event(conn, "favorite_write_ip", ip_hash, now)
-        conn.commit()
+        _consume_rate_limit(conn, "favorite_write_ip", ip_hash, now)
         user_id = session["user_id"]
         conn.execute("BEGIN IMMEDIATE")
         count = conn.execute(
@@ -3439,9 +3510,7 @@ def rename_collection(request: Request, payload: dict = Body(...)):
     ip_hash = _client_ip_hash(request)
     with get_accounts_db() as conn:
         session = _require_user(conn, request, now)
-        _enforce_rate_limit(conn, "favorite_write_ip", ip_hash, now)
-        _record_event(conn, "favorite_write_ip", ip_hash, now)
-        conn.commit()
+        _consume_rate_limit(conn, "favorite_write_ip", ip_hash, now)
         user_id = session["user_id"]
         conn.execute("BEGIN IMMEDIATE")
         owned = conn.execute(
@@ -3472,9 +3541,7 @@ def remove_collection(request: Request, payload: dict = Body(...)):
     ip_hash = _client_ip_hash(request)
     with get_accounts_db() as conn:
         session = _require_user(conn, request, now)
-        _enforce_rate_limit(conn, "favorite_write_ip", ip_hash, now)
-        _record_event(conn, "favorite_write_ip", ip_hash, now)
-        conn.commit()
+        _consume_rate_limit(conn, "favorite_write_ip", ip_hash, now)
         user_id = session["user_id"]
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
@@ -3519,13 +3586,13 @@ app.mount("/Images", StaticFiles(directory=str(BASE_DIR / "Images")), name="imag
 PAGE_CACHE_HEADERS = {"Cache-Control": "no-cache"}
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def root(request: Request = None):
     record_visit(request)
     return FileResponse(BASE_DIR / "index.html", headers=PAGE_CACHE_HEADERS)
 
 
-@app.get("/reviews", include_in_schema=False)
+@app.api_route("/reviews", methods=["GET", "HEAD"], include_in_schema=False)
 def reviews_page(request: Request = None):
     record_visit(request)
     return FileResponse(BASE_DIR / "reviews.html", headers=PAGE_CACHE_HEADERS)

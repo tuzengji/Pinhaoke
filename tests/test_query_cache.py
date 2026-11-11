@@ -53,7 +53,7 @@ class QueryCacheTests(unittest.TestCase):
 
     def test_cache_invalidates_for_in_place_wal_and_atomic_replacement(self):
         self.courses()
-        with sqlite3.connect(self.database) as writer:
+        with closing(sqlite3.connect(self.database)) as writer, writer:
             writer.execute("UPDATE basic_info SET notes='原位更新'")
         self.assertTrue(all(c['notes'] == '原位更新' for c in self.courses()['courses']))
         writer = sqlite3.connect(self.database)
@@ -66,7 +66,7 @@ class QueryCacheTests(unittest.TestCase):
             writer.close()
         replacement = self.root / 'replacement.db'
         shutil.copyfile(app.SUMMER_DB, replacement)
-        with sqlite3.connect(replacement) as writer:
+        with closing(sqlite3.connect(replacement)) as writer, writer:
             writer.execute("UPDATE basic_info SET notes='原子替换'")
         os.replace(replacement, self.database)
         self.assertTrue(all(c['notes'] == '原子替换' for c in self.courses()['courses']))

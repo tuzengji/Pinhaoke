@@ -41,8 +41,8 @@ def parse_schedule(raw: str):
 def parse_first_period(raw: str):
     """Return the smallest start-period number across all schedule slots, or None.
 
-    Period numbers run 1–13 in PKU's elective system (1 ≈ 08:00 morning,
-    13 ≈ 21:00 evening). Used by the 'time_asc' sort so courses earlier in
+    Period numbers run 1–14 in PKU's elective system (1 ≈ 08:00 morning,
+    13–14 ≈ evening). Used by the 'time_asc' sort so courses earlier in
     the day surface first.
     """
     if not raw:
